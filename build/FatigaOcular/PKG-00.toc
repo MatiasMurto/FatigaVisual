@@ -1,0 +1,75 @@
+('C:\\Users\\Matias '
+ 'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\FatigaOcular.pkg',
+ {'BINARY': True,
+  'DATA': True,
+  'EXECUTABLE': True,
+  'EXTENSION': True,
+  'PYMODULE': True,
+  'PYSOURCE': True,
+  'PYZ': False,
+  'SPLASH': True,
+  'SYMLINK': False},
+ [('pyi-contents-directory _internal', '', 'OPTION'),
+  ('PYZ-00.pyz',
+   'C:\\Users\\Matias '
+   'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\PYZ-00.pyz',
+   'PYZ'),
+  ('struct',
+   'C:\\Users\\Matias '
+   'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\localpycs\\struct.pyc',
+   'PYMODULE'),
+  ('pyimod01_archive',
+   'C:\\Users\\Matias '
+   'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\localpycs\\pyimod01_archive.pyc',
+   'PYMODULE'),
+  ('pyimod02_importers',
+   'C:\\Users\\Matias '
+   'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\localpycs\\pyimod02_importers.pyc',
+   'PYMODULE'),
+  ('pyimod03_ctypes',
+   'C:\\Users\\Matias '
+   'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\localpycs\\pyimod03_ctypes.pyc',
+   'PYMODULE'),
+  ('pyimod04_pywin32',
+   'C:\\Users\\Matias '
+   'Murto\\Documents\\tesis\\FatigaVisual\\build\\FatigaOcular\\localpycs\\pyimod04_pywin32.pyc',
+   'PYMODULE'),
+  ('pyiboot01_bootstrap',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'PYSOURCE'),
+  ('pyi_rth_inspect',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'PYSOURCE'),
+  ('pyi_rth_pkgutil',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'PYSOURCE'),
+  ('pyi_rth_multiprocessing',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'PYSOURCE'),
+  ('pyi_rth__tkinter',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth__tkinter.py',
+   'PYSOURCE'),
+  ('pyi_rth_mplconfig',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_mplconfig.py',
+   'PYSOURCE'),
+  ('pyi_rth_cryptography_openssl',
+   'C:\\Users\\Matias '
+   'Murto\\AppData\\Roaming\\Python\\Python314\\site-packages\\_pyinstaller_hooks_contrib\\rthooks\\pyi_rth_cryptography_openssl.py',
+   'PYSOURCE'),
+  ('main',
+   'C:\\Users\\Matias Murto\\Documents\\tesis\\FatigaVisual\\main.py',
+   'PYSOURCE')],
+ 'python314.dll',
+ True,
+ False,
+ False,
+ [],
+ None,
+ None,
+ None)
