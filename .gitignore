@@ -1,0 +1,62 @@
+# ============================================
+# Entorno virtual
+# ============================================
+.venv/
+venv/
+env/
+ENV/
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ============================================
+# PyInstaller (build de la app)
+# ============================================
+build/
+dist/
+*.manifest
+# El .spec sí se versiona (config de build). Para ignorarlo, descomentá:
+# *.spec
+
+# ============================================
+# IDE / Editor
+# ============================================
+.vscode/
+.idea/
+tempCodeRunnerFile.py
+
+# ============================================
+# Secretos y datos (NO subir)
+# secret.key = clave de cifrado AES-GCM: jamás debe ir al repo
+# *.db = base de datos SQLite con datos de usuarios/parpadeos
+# ============================================
+secret.key
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================
+# Modelo descargado automáticamente (se re-baja solo)
+# ============================================
+face_landmarker.task
+
+# ============================================
+# Logs y temporales
+# ============================================
+error_log.txt
+*.log
+
+# ============================================
+# Sistema operativo
+# ============================================
+Thumbs.db
+Desktop.ini
+.DS_Store

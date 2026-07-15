@@ -7,12 +7,15 @@ import sqlite3
 from datetime import datetime
 import urllib.request
 import os
+import sys
 from collections import deque
 import time
 import customtkinter as ctk
 from PIL import Image
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import base64
+import win32api
+import win32net
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
 MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
@@ -46,6 +49,24 @@ class GestorCifrado:
             return token  # dato legado sin cifrar
 
 # ==========================================
+# 0.1 AUTENTICACIÓN CON CUENTA DE WINDOWS
+# ==========================================
+class GestorAutenticacionWindows:
+    GRUPOS_ADMIN = ("administradores", "administrators")
+
+    @staticmethod
+    def usuario_actual():
+        return win32api.GetUserName()
+
+    @staticmethod
+    def es_admin_windows(usuario):
+        try:
+            grupos = win32net.NetUserGetLocalGroups(None, usuario)
+            return any(g.lower() in GestorAutenticacionWindows.GRUPOS_ADMIN for g in grupos)
+        except Exception:
+            return False
+
+# ==========================================
 # 1. GESTOR DE BASE DE DATOS
 # ==========================================
 class GestorBD:
@@ -76,20 +97,40 @@ class GestorBD:
             self.cursor.execute("ALTER TABLE registro_parpadeos ADD COLUMN usuario_id INTEGER")
         except sqlite3.OperationalError:
             pass
+        try:
+            self.cursor.execute("ALTER TABLE usuarios ADD COLUMN rol TEXT NOT NULL DEFAULT 'Usuario'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.cursor.execute("ALTER TABLE registro_parpadeos ADD COLUMN nivel_fatiga TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     def obtener_usuarios(self):
-        self.cursor.execute("SELECT id, nombre FROM usuarios ORDER BY nombre")
+        self.cursor.execute("SELECT id, nombre, rol FROM usuarios ORDER BY nombre")
         return self.cursor.fetchall()
 
-    def agregar_usuario(self, nombre):
+    def agregar_usuario(self, nombre, rol="Usuario"):
         try:
-            self.cursor.execute("INSERT INTO usuarios (nombre) VALUES (?)", (nombre,))
+            self.cursor.execute("INSERT INTO usuarios (nombre, rol) VALUES (?, ?)", (nombre, rol))
             self.conn.commit()
             return self.cursor.lastrowid
         except sqlite3.IntegrityError:
             self.cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (nombre,))
             return self.cursor.fetchone()[0]
+
+    def obtener_o_crear_usuario(self, nombre, rol_por_defecto="Usuario"):
+        self.cursor.execute("SELECT id, rol FROM usuarios WHERE nombre = ?", (nombre,))
+        fila = self.cursor.fetchone()
+        if fila:
+            return fila[0], fila[1]
+        usuario_id = self.agregar_usuario(nombre, rol_por_defecto)
+        return usuario_id, rol_por_defecto
+
+    def actualizar_rol(self, usuario_id, nuevo_rol):
+        self.cursor.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, usuario_id))
+        self.conn.commit()
 
     def _migrar_datos_existentes(self):
         self.cursor.execute("SELECT id, fecha_hora, ear_registrado FROM registro_parpadeos")
@@ -102,13 +143,14 @@ class GestorBD:
                 )
         self.conn.commit()
 
-    def registrar_parpadeo(self, ear_value, usuario_id=None):
+    def registrar_parpadeo(self, ear_value, usuario_id=None, nivel_fatiga=None):
         ahora       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         fecha_c     = self.cifrado.cifrar(ahora)
         ear_c       = self.cifrado.cifrar(str(round(ear_value, 3)))
+        nivel_c     = self.cifrado.cifrar(nivel_fatiga) if nivel_fatiga else None
         self.cursor.execute(
-            "INSERT INTO registro_parpadeos (fecha_hora, ear_registrado, usuario_id) VALUES (?, ?, ?)",
-            (fecha_c, ear_c, usuario_id)
+            "INSERT INTO registro_parpadeos (fecha_hora, ear_registrado, usuario_id, nivel_fatiga) VALUES (?, ?, ?, ?)",
+            (fecha_c, ear_c, usuario_id, nivel_c)
         )
         self.conn.commit()
 
@@ -132,21 +174,22 @@ class GestorBD:
     def obtener_historial(self, usuario_id=None, limit=50):
         if usuario_id:
             self.cursor.execute('''
-                SELECT r.fecha_hora, r.ear_registrado, COALESCE(u.nombre,'Sin usuario')
+                SELECT r.fecha_hora, r.ear_registrado, COALESCE(u.nombre,'Sin usuario'), r.nivel_fatiga
                 FROM registro_parpadeos r
                 LEFT JOIN usuarios u ON r.usuario_id = u.id
                 WHERE r.usuario_id = ? ORDER BY r.id DESC LIMIT ?
             ''', (usuario_id, limit))
         else:
             self.cursor.execute('''
-                SELECT r.fecha_hora, r.ear_registrado, COALESCE(u.nombre,'Sin usuario')
+                SELECT r.fecha_hora, r.ear_registrado, COALESCE(u.nombre,'Sin usuario'), r.nivel_fatiga
                 FROM registro_parpadeos r
                 LEFT JOIN usuarios u ON r.usuario_id = u.id
                 ORDER BY r.id DESC LIMIT ?
             ''', (limit,))
         return [
-            (self.cifrado.descifrar(str(f)), self.cifrado.descifrar(str(e)), n)
-            for f, e, n in self.cursor.fetchall()
+            (self.cifrado.descifrar(str(f)), self.cifrado.descifrar(str(e)), n,
+             self.cifrado.descifrar(str(nv)) if nv else "—")
+            for f, e, n, nv in self.cursor.fetchall()
         ]
 
     def cerrar(self):
@@ -209,18 +252,100 @@ class VentanaEstadisticas(ctk.CTkToplevel):
         tabla = ctk.CTkScrollableFrame(self, label_text="Últimos 50 registros")
         tabla.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
-        headers = ["Fecha / Hora", "EAR", "Usuario"]
-        widths  = [220, 80, 180]
+        headers = ["Fecha / Hora", "EAR", "Usuario", "Nivel"]
+        widths  = [200, 70, 150, 70]
         for col, (h_txt, w) in enumerate(zip(headers, widths)):
             ctk.CTkLabel(tabla, text=h_txt, font=ctk.CTkFont(weight="bold"),
                          width=w, anchor="w").grid(row=0, column=col, padx=4, pady=(4, 8), sticky="w")
 
-        for ri, (fecha, ear, nombre) in enumerate(bd.obtener_historial(usuario_id, 50), start=1):
+        for ri, (fecha, ear, nombre, nivel) in enumerate(bd.obtener_historial(usuario_id, 50), start=1):
             bg = "#2b2b2b" if ri % 2 == 0 else "#1e1e1e"
-            for col, (val, w) in enumerate(zip([fecha, f"{ear:.3f}", nombre], widths)):
+            for col, (val, w) in enumerate(zip([fecha, f"{ear:.3f}", nombre, nivel], widths)):
                 ctk.CTkLabel(tabla, text=val, width=w, anchor="w",
                              fg_color=bg, corner_radius=0).grid(
                     row=ri, column=col, padx=4, pady=1, sticky="ew")
+
+# ==========================================
+# 3.1 VENTANA DE LOGIN (autenticación con Windows)
+# ==========================================
+class VentanaLogin(ctk.CTkToplevel):
+    """Confirma la identidad reusando la sesión de Windows ya iniciada
+    (haber llegado al escritorio ya implica que Windows autenticó al
+    usuario). No se vuelve a pedir contraseña: LogonUser no es confiable
+    en equipos con PIN/Windows Hello o protecciones NTLM modernas."""
+
+    def __init__(self, parent, usuario_windows):
+        super().__init__(parent)
+        self.title("Iniciar sesión")
+        self.geometry("380x220")
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+
+        self.resultado_ok = False
+
+        ctk.CTkLabel(self, text="Fatiga Ocular EAR",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(28, 8))
+        ctk.CTkLabel(self, text="Sesión de Windows detectada:",
+                     text_color="gray").pack(pady=(0, 2))
+        ctk.CTkLabel(self, text=usuario_windows,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(pady=(0, 20))
+
+        frame_btn = ctk.CTkFrame(self, fg_color="transparent")
+        frame_btn.pack(pady=6)
+        ctk.CTkButton(frame_btn, text="Continuar", command=self._continuar).pack(side="left", padx=6)
+        ctk.CTkButton(frame_btn, text="Salir", fg_color="#555", hover_color="#666",
+                      command=self._cancelar).pack(side="left", padx=6)
+
+        self.lift()
+        self.grab_set()
+
+    def _continuar(self):
+        self.resultado_ok = True
+        self.grab_release()
+        self.destroy()
+
+    def _cancelar(self):
+        self.resultado_ok = False
+        self.grab_release()
+        self.destroy()
+
+# ==========================================
+# 3.2 VENTANA DE GESTIÓN DE USUARIOS (solo Administrador)
+# ==========================================
+class VentanaGestionUsuarios(ctk.CTkToplevel):
+    ROLES = ["Usuario", "Administrador"]
+
+    def __init__(self, parent, bd):
+        super().__init__(parent)
+        self.title("Gestión de Usuarios")
+        self.geometry("420x360")
+        self.bd = bd
+        self.lift()
+        self.focus()
+
+        ctk.CTkLabel(self, text="Roles de usuario", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 8))
+
+        self.lista = ctk.CTkScrollableFrame(self)
+        self.lista.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self._refrescar()
+
+    def _refrescar(self):
+        for widget in self.lista.winfo_children():
+            widget.destroy()
+
+        for uid, nombre, rol in self.bd.obtener_usuarios():
+            fila = ctk.CTkFrame(self.lista, fg_color="transparent")
+            fila.pack(fill="x", pady=4)
+            ctk.CTkLabel(fila, text=nombre, width=160, anchor="w").pack(side="left", padx=(0, 6))
+            combo = ctk.CTkComboBox(fila, values=self.ROLES, width=140)
+            combo.set(rol)
+            combo.pack(side="left", padx=(0, 6))
+            ctk.CTkButton(fila, text="Guardar", width=70,
+                          command=lambda u=uid, c=combo: self._guardar(u, c.get())).pack(side="left")
+
+    def _guardar(self, usuario_id, nuevo_rol):
+        self.bd.actualizar_rol(usuario_id, nuevo_rol)
+        self._refrescar()
 
 # ==========================================
 # 4. INTERFAZ PRINCIPAL
@@ -229,7 +354,7 @@ class VentanaEstadisticas(ctk.CTkToplevel):
 # Valores por defecto de calibración
 DEFAULTS = {
     "umbral_ear":  0.22,
-    "frames_cons": 3,
+    "frames_cons": 2,
     "buffer_ear":  5,
     "brillo":      0,
     "contraste":   1.0,
@@ -243,6 +368,15 @@ class InterfazFatiga(ctk.CTk):
         self.geometry("1050x660")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        self.withdraw()
+
+        # Autenticación con la cuenta de Windows del usuario
+        usuario_windows = GestorAutenticacionWindows.usuario_actual()
+        login = VentanaLogin(self, usuario_windows)
+        self.wait_window(login)
+        if not login.resultado_ok:
+            self.destroy()
+            sys.exit(0)
 
         # Estado detección
         self.contador_cuadros  = 0
@@ -252,14 +386,27 @@ class InterfazFatiga(ctk.CTk):
         self.camara_visible    = False
         self.cap               = None
         self.usuario_id        = None
-        self.usuario_nombre    = "Sin usuario"
+        self.usuario_nombre    = usuario_windows
+        self.rol_actual        = "Usuario"
 
-        # Auto-calibración
-        self.calib_fase      = 0   # 0=idle 1=ojos abiertos 2=parpadeando 3=done
-        self.calib_muestras  = []
-        self.calib_ear_open  = None
-        self.calib_inicio    = None
-        self.CALIB_DURACION  = 3.0  # segundos por fase
+        # Auto-calibración (auto-ajustar todo)
+        # fases: 0=idle 1=ajuste de imagen 2=ojos abiertos 3=parpadeando 4=done
+        self.calib_fase            = 0
+        self.calib_muestras        = []
+        self.calib_muestras_brillo = []
+        self.calib_muestras_std    = []
+        self.calib_muestras_alta   = []
+        self.calib_muestras_baja   = []
+        self.calib_ear_open        = None
+        self.calib_inicio          = None
+        self.CALIB_DURACION        = 3.0   # segundos, fases de ojos/parpadeo
+        self.CALIB_DURACION_IMAGEN = 1.5   # segundos, fase de ajuste de imagen
+
+        # Umbral adaptativo: se recalcula solo en base al EAR reciente con
+        # ojos abiertos, para no depender de una calibración fija a una
+        # distancia/luz puntual (cambiar de distancia dejaba de detectar).
+        self._baseline_abierto = None
+        self._k_umbral         = 0.75  # umbral = 75% del EAR típico abierto; se refina al calibrar
 
         # Anti-falsos-positivos
         self.cooldown_contador = 0
@@ -274,10 +421,17 @@ class InterfazFatiga(ctk.CTk):
         self.p_contraste   = DEFAULTS["contraste"]
         self.p_clahe       = DEFAULTS["clahe"]
 
-        self.bd        = GestorBD()
+        self.bd = GestorBD()
+        es_admin_win = GestorAutenticacionWindows.es_admin_windows(usuario_windows)
+        self.usuario_id, self.rol_actual = self.bd.obtener_o_crear_usuario(
+            usuario_windows, "Administrador" if es_admin_win else "Usuario")
+
         self.ear_buffer = deque(maxlen=self.p_buffer_ear)
+        self._ema_izq   = None  # suavizado exponencial de puntos del ojo (reduce jitter)
+        self._ema_der   = None
         self._preparar_mediapipe()
         self._construir_ui()
+        self.deiconify()
 
     # ── MediaPipe ────────────────────────────────────
     def _preparar_mediapipe(self):
@@ -289,7 +443,7 @@ class InterfazFatiga(ctk.CTk):
             running_mode=mp_vision.RunningMode.VIDEO,
             num_faces=1,
             min_face_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_tracking_confidence=0.6
         )
         self.face_landmarker = mp_vision.FaceLandmarker.create_from_options(options)
         self.timestamp_ms    = 0
@@ -310,10 +464,11 @@ class InterfazFatiga(ctk.CTk):
         tabs = ctk.CTkTabview(panel)
         tabs.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         tabs.add("Control")
-        tabs.add("Calibración")
-
         self._tab_control(tabs.tab("Control"))
-        self._tab_calibracion(tabs.tab("Calibración"))
+
+        if self.rol_actual == "Administrador":
+            tabs.add("Calibración")
+            self._tab_calibracion(tabs.tab("Calibración"))
 
         # Panel derecho (video) — oculto por defecto
         self.frame_derecho = ctk.CTkFrame(self)
@@ -324,23 +479,14 @@ class InterfazFatiga(ctk.CTk):
         self.geometry("310x660")
 
     def _tab_control(self, tab):
-        # Usuario
+        # Usuario (identidad = sesión de Windows autenticada al iniciar)
         ctk.CTkLabel(tab, text="Usuario:", anchor="w").pack(fill="x", padx=10)
-        frame_usr = ctk.CTkFrame(tab, fg_color="transparent")
-        frame_usr.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(tab, text=f"{self.usuario_nombre}  ({self.rol_actual})",
+                     anchor="w", font=ctk.CTkFont(weight="bold")).pack(fill="x", padx=10, pady=(2, 8))
 
-        usuarios = self.bd.obtener_usuarios()
-        opciones = [u[1] for u in usuarios] if usuarios else ["(ninguno)"]
-        self._map_usuarios = {u[1]: u[0] for u in usuarios}
-
-        self.combo_usuario = ctk.CTkComboBox(frame_usr, values=opciones, width=160,
-                                              command=self._seleccionar_usuario)
-        self.combo_usuario.pack(side="left")
-        if usuarios:
-            self.combo_usuario.set(opciones[0])
-            self._seleccionar_usuario(opciones[0])
-        ctk.CTkButton(frame_usr, text="+", width=36,
-                      command=self._agregar_usuario).pack(side="left", padx=(6, 0))
+        if self.rol_actual == "Administrador":
+            ctk.CTkButton(tab, text="Gestionar Usuarios", fg_color="#555", hover_color="#666",
+                          command=self._abrir_gestion_usuarios).pack(padx=10, pady=(0, 8), fill="x")
 
         ctk.CTkFrame(tab, height=1, fg_color="#444").pack(fill="x", padx=8, pady=6)
 
@@ -348,12 +494,26 @@ class InterfazFatiga(ctk.CTk):
         self.btn_iniciar = ctk.CTkButton(tab, text="Iniciar Detección", command=self.toggle_sistema)
         self.btn_iniciar.pack(padx=10, pady=4, fill="x")
 
+        self.btn_auto = ctk.CTkButton(tab, text="Auto-ajustar Todo",
+                                       fg_color="#5a3a9a", hover_color="#7a4abb",
+                                       command=self._iniciar_auto_calibracion)
+        self.btn_auto.pack(padx=10, pady=4, fill="x")
+
+        self.label_calib_estado = ctk.CTkLabel(tab, text="", text_color="#ffcc00",
+                                                font=ctk.CTkFont(size=11, weight="bold"),
+                                                wraplength=260, justify="left")
+        self.label_calib_estado.pack(padx=10, pady=(0, 4))
+
         self.btn_camara = ctk.CTkButton(tab, text="Mostrar Cámara", command=self.toggle_camara,
                                          fg_color="#555", hover_color="#666")
         self.btn_camara.pack(padx=10, pady=4, fill="x")
 
         ctk.CTkButton(tab, text="Ver Estadísticas", command=self.abrir_estadisticas,
                       fg_color="#2a6b2a", hover_color="#3a8b3a").pack(padx=10, pady=4, fill="x")
+
+        if self.rol_actual == "Administrador":
+            ctk.CTkButton(tab, text="Ver Estadísticas (Todos)", command=self.abrir_estadisticas_todos,
+                          fg_color="#2a6b2a", hover_color="#3a8b3a").pack(padx=10, pady=4, fill="x")
 
         ctk.CTkFrame(tab, height=1, fg_color="#444").pack(fill="x", padx=8, pady=6)
 
@@ -434,18 +594,9 @@ class InterfazFatiga(ctk.CTk):
 
         ctk.CTkFrame(scroll, height=1, fg_color="#444").pack(fill="x", padx=8, pady=12)
 
-        # Auto-calibración
-        ctk.CTkLabel(scroll, text="— Auto-calibración —", text_color="#aaa").pack(pady=(0, 4))
-
-        self.btn_auto = ctk.CTkButton(scroll, text="Auto-calibrar",
-                                       fg_color="#5a3a9a", hover_color="#7a4abb",
-                                       command=self._iniciar_auto_calibracion)
-        self.btn_auto.pack(padx=10, pady=4, fill="x")
-
-        self.label_calib_estado = ctk.CTkLabel(scroll, text="", text_color="#ffcc00",
-                                                font=ctk.CTkFont(size=12, weight="bold"),
-                                                wraplength=230)
-        self.label_calib_estado.pack(padx=10, pady=4)
+        ctk.CTkButton(scroll, text="Fijar Cámara (bloquear auto-ajuste)",
+                      fg_color="#555", hover_color="#666",
+                      command=self._fijar_camara).pack(padx=10, pady=(4, 0), fill="x")
 
         ctk.CTkFrame(scroll, height=1, fg_color="#444").pack(fill="x", padx=8, pady=8)
 
@@ -453,39 +604,108 @@ class InterfazFatiga(ctk.CTk):
                       fg_color="#555", hover_color="#666",
                       command=self._restablecer_calibracion).pack(padx=10, pady=(0, 10), fill="x")
 
-    # ── Auto-calibración ─────────────────────────────
+    # ── Auto-calibración (auto-ajustar todo) ─────────
     def _iniciar_auto_calibracion(self):
         if not self.sistema_activo:
             self.label_calib_estado.configure(text="Iniciá la detección primero.")
             return
-        self.calib_fase          = 1
-        self.calib_muestras      = []
-        self.calib_ear_open      = None
-        self.calib_inicio        = time.time()
-        self.calib_blink_frames  = 0
-        self.calib_duraciones    = []
+        self.calib_fase            = 1
+        self.calib_muestras        = []
+        self.calib_muestras_brillo = []
+        self.calib_muestras_std    = []
+        self.calib_muestras_alta   = []
+        self.calib_muestras_baja   = []
+        self.calib_ear_open        = None
+        self.calib_inicio          = time.time()
+        self.calib_blink_frames    = 0
+        self.calib_duraciones      = []
         self.btn_auto.configure(state="disabled")
-        self.label_calib_estado.configure(text="Fase 1/2: Mantené los ojos MUY ABIERTOS...")
+        self.label_calib_estado.configure(text="Fase 1/3: Ajustando imagen (mirá a cámara)...")
 
-    def _procesar_auto_calibracion(self, ear):
+    def _aplicar_ajuste_imagen(self):
+        if not self.calib_muestras_brillo:
+            return
+        brillo_prom = sum(self.calib_muestras_brillo) / len(self.calib_muestras_brillo)
+        std_prom    = sum(self.calib_muestras_std) / len(self.calib_muestras_std)
+        alta_prom   = sum(self.calib_muestras_alta) / len(self.calib_muestras_alta)
+        baja_prom   = sum(self.calib_muestras_baja) / len(self.calib_muestras_baja)
+
+        # Brillo: acercar el promedio de la cara al gris medio (128)
+        nuevo_brillo = int(max(-100, min(100, round(128 - brillo_prom))))
+        # Contraste: si la imagen es plana (poco std), subirlo un poco
+        nuevo_contraste = 1.3 if std_prom < 35 else 1.0
+        # CLAHE: si hay zonas quemadas (destello) o muy oscuras, subirlo más
+        nuevo_clahe = 5.5 if (alta_prom > 0.05 or baja_prom > 0.15) else 3.0
+
+        self.p_brillo    = nuevo_brillo
+        self.p_contraste = nuevo_contraste
+        self.p_clahe      = nuevo_clahe
+        self._set_slider("sl_brillo", nuevo_brillo)
+        self._set_slider("sl_contraste", nuevo_contraste)
+        self._set_slider("sl_clahe", nuevo_clahe)
+
+        self._fijar_camara()
+
+    def _fijar_camara(self):
+        """Congela exposición/foco/balance de blancos de la cámara para que
+        deje de reajustarse sola (fuente extra de ruido → parpadeos falsos).
+        Best-effort: depende del driver de cada cámara, puede no tener efecto."""
+        if not self.cap:
+            return
+        try:
+            self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        except Exception:
+            pass
+        try:
+            exposicion_actual = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # DSHOW: 0.75 = manual
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, exposicion_actual)
+        except Exception:
+            pass
+        try:
+            self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        except Exception:
+            pass
+
+    def _procesar_auto_calibracion(self, ear, frame=None, recorte_cara=None):
         if self.calib_fase == 0:
             return
-        elapsed = time.time() - self.calib_inicio
-        restante = max(0, self.CALIB_DURACION - elapsed)
 
         if self.calib_fase == 1:
+            elapsed  = time.time() - self.calib_inicio
+            restante = max(0, self.CALIB_DURACION_IMAGEN - elapsed)
+            if frame is not None and recorte_cara is not None:
+                x1, y1, x2, y2 = recorte_cara
+                gris = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+                self.calib_muestras_brillo.append(float(gris.mean()))
+                self.calib_muestras_std.append(float(gris.std()))
+                self.calib_muestras_alta.append(float((gris > 240).mean()))
+                self.calib_muestras_baja.append(float((gris < 15).mean()))
+            self.label_calib_estado.configure(
+                text=f"Fase 1/3: Ajustando imagen\n({restante:.1f}s restantes)")
+            if elapsed >= self.CALIB_DURACION_IMAGEN:
+                self._aplicar_ajuste_imagen()
+                self.calib_fase   = 2
+                self.calib_inicio = time.time()
+                self.label_calib_estado.configure(text="Fase 2/3: Mantené los ojos MUY ABIERTOS...")
+            return
+
+        elapsed  = time.time() - self.calib_inicio
+        restante = max(0, self.CALIB_DURACION - elapsed)
+
+        if self.calib_fase == 2:
             self.calib_muestras.append(ear)
             self.label_calib_estado.configure(
-                text=f"Fase 1/2: Ojos ABIERTOS\n({restante:.1f}s restantes)")
+                text=f"Fase 2/3: Ojos ABIERTOS\n({restante:.1f}s restantes)")
             if elapsed >= self.CALIB_DURACION:
                 self.calib_ear_open = sum(self.calib_muestras) / len(self.calib_muestras)
                 self.calib_muestras = []
-                self.calib_fase     = 2
+                self.calib_fase     = 3
                 self.calib_inicio   = time.time()
                 self.label_calib_estado.configure(
-                    text="Fase 2/2: Ahora PARPADEÁ normalmente...")
+                    text="Fase 3/3: Ahora PARPADEÁ normalmente...")
 
-        elif self.calib_fase == 2:
+        elif self.calib_fase == 3:
             self.calib_muestras.append(ear)
 
             # Medir duración real de cada parpadeo
@@ -497,7 +717,7 @@ class InterfazFatiga(ctk.CTk):
                 self.calib_blink_frames = 0
 
             self.label_calib_estado.configure(
-                text=f"Fase 2/2: Parpadeá normalmente\n({restante:.1f}s restantes)")
+                text=f"Fase 3/3: Parpadeá normalmente\n({restante:.1f}s restantes)")
             if elapsed >= self.CALIB_DURACION:
                 ear_min = min(self.calib_muestras)
                 umbral  = round((self.calib_ear_open + ear_min) / 2.0, 3)
@@ -512,14 +732,20 @@ class InterfazFatiga(ctk.CTk):
 
                 self.p_umbral_ear = umbral
                 self.p_frames_max = frames_max
-                self.sl_umbral.set(umbral)
-                self.sl_frames_max.set(frames_max)
-                self.calib_fase = 3
+                self._set_slider("sl_umbral", umbral)
+                self._set_slider("sl_frames_max", frames_max)
+
+                # Semilla + ratio para el umbral adaptativo continuo
+                self._baseline_abierto = self.calib_ear_open
+                if self.calib_ear_open:
+                    self._k_umbral = round(umbral / self.calib_ear_open, 3)
+
+                self.calib_fase = 4
 
                 duraciones_txt = (f"Duración parpadeos: {self.calib_duraciones} frames\n"
                                   if self.calib_duraciones else "Sin parpadeos detectados\n")
                 self.label_calib_estado.configure(
-                    text=f"Calibrado.\nEAR abierto: {self.calib_ear_open:.3f}\n"
+                    text=f"Listo. Imagen y umbral ajustados.\nEAR abierto: {self.calib_ear_open:.3f}\n"
                          f"EAR mín: {ear_min:.3f}  →  Umbral: {umbral:.3f}\n"
                          f"{duraciones_txt}Frames máx cierre: {frames_max}")
                 self.btn_auto.configure(state="normal")
@@ -543,27 +769,20 @@ class InterfazFatiga(ctk.CTk):
         self.sl_brillo.set(self.p_brillo)
         self.sl_contraste.set(self.p_contraste)
         self.sl_clahe.set(self.p_clahe)
+        self._baseline_abierto = None
+        self._k_umbral         = 0.75
 
     # ── Usuarios ─────────────────────────────────────
-    def _seleccionar_usuario(self, nombre):
-        self.usuario_id     = self._map_usuarios.get(nombre)
-        self.usuario_nombre = nombre if self.usuario_id else "Sin usuario"
-
-    def _agregar_usuario(self):
-        dialogo = ctk.CTkInputDialog(text="Nombre del nuevo usuario:", title="Agregar Usuario")
-        nombre  = dialogo.get_input()
-        if nombre and nombre.strip():
-            nombre = nombre.strip()
-            uid    = self.bd.agregar_usuario(nombre)
-            self._map_usuarios[nombre] = uid
-            self.combo_usuario.configure(values=list(self._map_usuarios.keys()))
-            self.combo_usuario.set(nombre)
-            self._seleccionar_usuario(nombre)
+    def _abrir_gestion_usuarios(self):
+        VentanaGestionUsuarios(self, self.bd)
 
     # ── Control sistema ──────────────────────────────
     def toggle_sistema(self):
         if not self.sistema_activo:
-            self.cap = cv2.VideoCapture(0)
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             self.sistema_activo    = True
             self.total_parpadeos   = 0
             self.historial_tiempos = []
@@ -596,7 +815,20 @@ class InterfazFatiga(ctk.CTk):
     def abrir_estadisticas(self):
         VentanaEstadisticas(self, self.bd, self.usuario_id, self.usuario_nombre)
 
+    def abrir_estadisticas_todos(self):
+        VentanaEstadisticas(self, self.bd, None, "Todos")
+
     # ── Loop de video ────────────────────────────────
+    def _nivel_fatiga_actual(self):
+        ahora     = time.time()
+        recientes = [t for t in self.historial_tiempos if ahora - t <= 60]
+        bpm       = len(recientes)
+        if bpm < 10:
+            return "Alta"
+        elif bpm < 15:
+            return "Media"
+        return "Baja"
+
     def actualizar_frecuencia(self):
         ahora = time.time()
         self.historial_tiempos = [t for t in self.historial_tiempos if ahora - t <= 60]
@@ -607,7 +839,50 @@ class InterfazFatiga(ctk.CTk):
         else:
             self.label_alerta.configure(text="")
 
+    @staticmethod
+    def _ajustar_a_marco(frame, ancho_marco, alto_marco):
+        h, w = frame.shape[:2]
+        escala = min(ancho_marco / w, alto_marco / h)
+        nuevo_w, nuevo_h = int(w * escala), int(h * escala)
+        redimensionado = cv2.resize(frame, (nuevo_w, nuevo_h))
+
+        marco = cv2.copyMakeBorder(
+            redimensionado,
+            (alto_marco - nuevo_h) // 2, alto_marco - nuevo_h - (alto_marco - nuevo_h) // 2,
+            (ancho_marco - nuevo_w) // 2, ancho_marco - nuevo_w - (ancho_marco - nuevo_w) // 2,
+            cv2.BORDER_CONSTANT, value=(0, 0, 0)
+        )
+        return marco
+
+    def _set_slider(self, atributo, valor):
+        """Actualiza un slider de Calibración si existe (no existir para rol Usuario)."""
+        slider = getattr(self, atributo, None)
+        if slider is not None:
+            slider.set(valor)
+
+    def _actualizar_umbral_adaptativo(self, ear):
+        if self._baseline_abierto is None:
+            self._baseline_abierto = ear
+        else:
+            self._baseline_abierto = 0.98 * self._baseline_abierto + 0.02 * ear
+        nuevo_umbral       = round(self._baseline_abierto * self._k_umbral, 3)
+        self.p_umbral_ear  = max(0.10, min(0.40, nuevo_umbral))
+        self._set_slider("sl_umbral", self.p_umbral_ear)
+
+    def _suavizar_puntos(self, puntos_nuevos, atributo, alpha=0.5):
+        previos = getattr(self, atributo)
+        if previos is None or len(previos) != len(puntos_nuevos):
+            suavizados = [(float(x), float(y)) for x, y in puntos_nuevos]
+        else:
+            suavizados = [
+                (alpha * nx + (1 - alpha) * px, alpha * ny + (1 - alpha) * py)
+                for (nx, ny), (px, py) in zip(puntos_nuevos, previos)
+            ]
+        setattr(self, atributo, suavizados)
+        return suavizados
+
     def dibujar_ojo(self, frame, puntos):
+        puntos = [(int(x), int(y)) for x, y in puntos]
         for i in range(len(puntos)):
             cv2.line(frame, puntos[i], puntos[(i + 1) % len(puntos)], (0, 255, 0), 1)
         # Puntos laterales p1 (índice 0) y p4 (índice 3) en amarillo
@@ -649,7 +924,7 @@ class InterfazFatiga(ctk.CTk):
             self.timestamp_ms += 33
 
             ear_suavizado = 0.0
-            frame_mostrar = cv2.resize(frame, (640, 480))
+            recorte_cara  = None
 
             if resultado.face_landmarks:
                 for face_landmarks in resultado.face_landmarks:
@@ -658,16 +933,25 @@ class InterfazFatiga(ctk.CTk):
                     p_der = CalculadorEAR.obtener_coordenadas(
                         CalculadorEAR.OJO_DERECHO, face_landmarks, w, h)
 
-                    ear = (CalculadorEAR.calcular_ear_ojo(p_izq) +
-                           CalculadorEAR.calcular_ear_ojo(p_der)) / 2.0
+                    p_izq = self._suavizar_puntos(p_izq, "_ema_izq")
+                    p_der = self._suavizar_puntos(p_der, "_ema_der")
+
+                    ear_izq = CalculadorEAR.calcular_ear_ojo(p_izq)
+                    ear_der = CalculadorEAR.calcular_ear_ojo(p_der)
+                    ear     = (ear_izq + ear_der) / 2.0
                     self.ear_buffer.append(ear)
-                    ear_suavizado = sum(self.ear_buffer) / len(self.ear_buffer)
+                    ear_suavizado = sum(self.ear_buffer) / len(self.ear_buffer)  # solo para mostrar en pantalla
 
                     self.dibujar_ojo(frame, p_izq)
                     self.dibujar_ojo(frame, p_der)
 
-                    # Detección con parámetros vivos
-                    if ear_suavizado < self.p_umbral_ear:
+                    # Detección con EAR crudo por frame (sin promediar en el tiempo,
+                    # para no perder parpadeos rápidos), pero exigiendo que AMBOS
+                    # ojos crucen el umbral. Un reflejo/destello suele afectar un
+                    # solo lente a la vez y bajaba el promedio combinado sin que
+                    # el usuario parpadeara de verdad; un parpadeo real cierra los
+                    # dos ojos juntos.
+                    if ear_izq < self.p_umbral_ear and ear_der < self.p_umbral_ear:
                         self.contador_cuadros += 1
                         if self.contador_cuadros > self.p_frames_max:
                             estado_ojo = "Cierre largo (ignorado)"
@@ -678,7 +962,8 @@ class InterfazFatiga(ctk.CTk):
                         if cerrado_ok and self.cooldown_contador == 0:
                             self.total_parpadeos += 1
                             self.historial_tiempos.append(time.time())
-                            self.bd.registrar_parpadeo(ear_suavizado, self.usuario_id)
+                            nivel = self._nivel_fatiga_actual()
+                            self.bd.registrar_parpadeo(ear_suavizado, self.usuario_id, nivel)
                             self.cooldown_contador = self.p_cooldown
                             cv2.putText(frame, "PARPADEO!", (50, 50),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -688,27 +973,38 @@ class InterfazFatiga(ctk.CTk):
                             estado_ojo = "Cooldown..."
                         else:
                             estado_ojo = "Abierto"
+                            self._actualizar_umbral_adaptativo(ear)
 
                     self.label_estado_ojo.configure(text=f"Ojo:              {estado_ojo}")
-                    self._procesar_auto_calibracion(ear_suavizado)
 
-                    # Zoom digital al rostro
+                    # Recorte a la cara (para mostrar en pantalla y para medir
+                    # brillo/contraste en el auto-ajuste de imagen; no afecta detección)
                     xs = [int(lm.x * w) for lm in face_landmarks]
                     ys = [int(lm.y * h) for lm in face_landmarks]
                     x1 = max(0, min(xs) - 80);  y1 = max(0, min(ys) - 120)
                     x2 = min(w, max(xs) + 80);  y2 = min(h, max(ys) + 120)
                     if x2 > x1 and y2 > y1:
-                        frame_mostrar = cv2.resize(frame[y1:y2, x1:x2], (640, 480))
+                        recorte_cara = (x1, y1, x2, y2)
+
+                    self._procesar_auto_calibracion(ear, frame, recorte_cara)
             else:
                 self.label_estado_ojo.configure(text="Ojo:              sin rostro")
+                self._ema_izq = None
+                self._ema_der = None
+
+            if recorte_cara:
+                x1, y1, x2, y2 = recorte_cara
+                frame_mostrar = self._ajustar_a_marco(frame[y1:y2, x1:x2], 640, 480)
+            else:
+                frame_mostrar = self._ajustar_a_marco(frame, 640, 480)
 
             self.label_ear.configure(text=f"EAR:              {ear_suavizado:.3f}")
             self.label_parpadeos.configure(text=f"Parpadeos:        {self.total_parpadeos}")
             self.actualizar_frecuencia()
 
             # Overlay calibración
-            if self.calib_fase in (1, 2):
-                msgs = {1: "OJOS ABIERTOS", 2: "PARPADEA NORMAL"}
+            if self.calib_fase in (1, 2, 3):
+                msgs = {1: "AJUSTANDO IMAGEN", 2: "OJOS ABIERTOS", 3: "PARPADEA NORMAL"}
                 cv2.rectangle(frame_mostrar, (0, 0), (640, 50), (80, 0, 120), -1)
                 cv2.putText(frame_mostrar, f"CALIBRANDO: {msgs[self.calib_fase]}",
                             (10, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 220, 0), 2)

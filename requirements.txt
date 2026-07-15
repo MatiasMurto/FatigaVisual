@@ -1,5 +1,7 @@
-opencv-python==4.13.0
+opencv-python==4.13.0.92
 mediapipe==0.10.35
 customtkinter==5.2.2
 Pillow==12.2.0
 cryptography==48.0.0
+pywin32==312
+matplotlib==3.11.0
