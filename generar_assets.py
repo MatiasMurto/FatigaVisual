@@ -65,6 +65,62 @@ def dibujar_ojo(S, apertura=1.0):
     return img
 
 
+def _lienzo(size, escala=4):
+    """Lienzo RGBA supersampleado (dibujar grande, reducir = líneas suaves)."""
+    S = size * escala
+    return Image.new("RGBA", (S, S), (0, 0, 0, 0)), S
+
+
+def _reducir(img, size):
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def icono_logout(size=24, color=(255, 255, 255, 255)):
+    """Puerta con flecha de salida (reemplaza el emoji 🚪, que no renderiza
+    bien en Tkinter/Windows)."""
+    img, S = _lienzo(size)
+    d = ImageDraw.Draw(img)
+    w = max(2, S // 14)
+    # Marco de puerta (rectángulo abierto a la derecha)
+    d.rounded_rectangle([S*0.12, S*0.14, S*0.52, S*0.86], radius=S*0.05, outline=color, width=w)
+    # Flecha saliendo
+    y = S * 0.5
+    d.line([S*0.42, y, S*0.88, y], fill=color, width=w)
+    d.line([S*0.68, y - S*0.18, S*0.88, y], fill=color, width=w)
+    d.line([S*0.68, y + S*0.18, S*0.88, y], fill=color, width=w)
+    return _reducir(img, size)
+
+
+def icono_nav(nombre, size=20, color=(176, 184, 199, 255)):
+    img, S = _lienzo(size)
+    d = ImageDraw.Draw(img)
+    w = max(2, S // 12)
+    if nombre == "control":
+        d.ellipse([S*0.1, S*0.1, S*0.9, S*0.9], outline=color, width=w)
+        d.line([S*0.5, S*0.5, S*0.5, S*0.22], fill=color, width=w)
+        d.line([S*0.5, S*0.5, S*0.72, S*0.6], fill=color, width=w)
+    elif nombre == "calib":
+        for i, x in enumerate([0.3, 0.6, 0.42]):
+            yy = S * (0.22 + i * 0.28)
+            d.line([S*0.08, yy, S*0.92, yy], fill=color, width=max(2, w-1))
+            d.ellipse([S*x-S*0.07, yy-S*0.07, S*x+S*0.07, yy+S*0.07], fill=color)
+    elif nombre == "stats":
+        base = S * 0.86
+        for x, h in [(0.18, 0.35), (0.44, 0.6), (0.7, 0.45)]:
+            d.rectangle([S*x, base - S*h, S*x + S*0.16, base], fill=color)
+    elif nombre == "chart":
+        d.line([S*0.1, S*0.65, S*0.35, S*0.4, S*0.55, S*0.55, S*0.9, S*0.15],
+               fill=color, width=w, joint="curve")
+        r = S * 0.06
+        d.ellipse([S*0.9-r, S*0.15-r, S*0.9+r, S*0.15+r], fill=color)
+    elif nombre == "about":
+        d.ellipse([S*0.1, S*0.1, S*0.9, S*0.9], outline=color, width=w)
+        r = S * 0.06
+        d.ellipse([S*0.5-r, S*0.27-r, S*0.5+r, S*0.27+r], fill=color)
+        d.line([S*0.5, S*0.42, S*0.5, S*0.72], fill=color, width=w)
+    return _reducir(img, size)
+
+
 def main():
     os.makedirs(ASSETS, exist_ok=True)
 
@@ -75,6 +131,10 @@ def main():
 
     for nombre, ap in [("ojo_abierto", 1.0), ("ojo_semi", 0.45), ("ojo_cerrado", 0.05)]:
         dibujar_ojo(160, ap).save(os.path.join(ASSETS, f"{nombre}.png"))
+
+    icono_logout().save(os.path.join(ASSETS, "icon_logout.png"))
+    for nombre in ("control", "calib", "stats", "chart", "about"):
+        icono_nav(nombre).save(os.path.join(ASSETS, f"icon_nav_{nombre}.png"))
 
     print("Assets generados en:", ASSETS)
     for f in sorted(os.listdir(ASSETS)):
