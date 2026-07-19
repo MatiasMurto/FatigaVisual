@@ -5,6 +5,9 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 import math
 import statistics
+import hashlib
+import asyncio
+import threading
 import sqlite3
 from datetime import datetime
 import urllib.request
@@ -18,6 +21,18 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import base64
 import win32api
 import win32net
+import win32security
+import winreg
+
+# Windows Hello (pywinrt). Import opcional: si falta el paquete o falla,
+# la app sigue funcionando con el flujo sin verificación biométrica.
+try:
+    import winrt.windows.security.credentials.ui as winrt_ui
+    HELLO_IMPORTADO = True
+except Exception:
+    winrt_ui = None
+    HELLO_IMPORTADO = False
+
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
@@ -69,6 +84,85 @@ class GestorAutenticacionWindows:
         try:
             grupos = win32net.NetUserGetLocalGroups(None, usuario)
             return any(g.lower() in GestorAutenticacionWindows.GRUPOS_ADMIN for g in grupos)
+        except Exception:
+            return False
+
+    # ── Windows Hello (PIN / huella / rostro) ────────
+    # UserConsentVerifier solo puede verificar al usuario de la SESIÓN actual
+    # de Windows; los demás perfiles de la app usan PIN propio hasheado.
+    @staticmethod
+    def hello_disponible():
+        if not HELLO_IMPORTADO:
+            return False
+        try:
+            avail = asyncio.run(winrt_ui.UserConsentVerifier.check_availability_async())
+            return int(avail) == 0  # 0 = Available
+        except Exception:
+            return False
+
+    @staticmethod
+    def verificar_hello(mensaje="Confirmá tu identidad"):
+        """Muestra el diálogo nativo de Windows Hello. True solo si Verified."""
+        try:
+            resultado = asyncio.run(asyncio.wait_for(
+                winrt_ui.UserConsentVerifier.request_verification_async(mensaje),
+                timeout=120))
+            return int(resultado) == 0  # 0 = Verified
+        except Exception:
+            return False
+
+    # ── Fallbacks cuando no hay Windows Hello ────────
+    @staticmethod
+    def es_cuenta_microsoft(usuario=None):
+        """True si la sesión actual está vinculada a una cuenta Microsoft (MSA).
+        Lee HKCU\\...\\IdentityCRL\\UserExtendedProperties (una subclave por MSA
+        vinculada). Solo es válido para el usuario de la sesión actual, que es
+        exactamente el único perfil 'windows' de la app. Si no se puede leer,
+        se asume cuenta local clásica."""
+        try:
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                               r"Software\Microsoft\IdentityCRL\UserExtendedProperties")
+            subclaves = winreg.QueryInfoKey(k)[0]
+            winreg.CloseKey(k)
+            return subclaves > 0
+        except OSError:
+            return False
+
+    @staticmethod
+    def validar_password_local(usuario, password):
+        """Valida la contraseña de Windows de una cuenta LOCAL con LogonUser.
+        (Para cuentas Microsoft no funciona: Windows no expone hash validable.)"""
+        for dominio in (".", win32api.GetComputerName()):
+            try:
+                token = win32security.LogonUser(
+                    usuario, dominio, password,
+                    win32security.LOGON32_LOGON_INTERACTIVE,
+                    win32security.LOGON32_PROVIDER_DEFAULT)
+                token.Close()
+                return True
+            except win32security.error:
+                continue
+        return False
+
+
+# ==========================================
+# 0.2 HASH DE PIN DE PERFILES (PBKDF2-SHA256)
+# ==========================================
+class GestorPin:
+    ITERACIONES = 200_000
+
+    @classmethod
+    def hashear(cls, pin: str) -> str:
+        salt = os.urandom(16)
+        h = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, cls.ITERACIONES)
+        return f"{salt.hex()}${h.hex()}"
+
+    @classmethod
+    def verificar(cls, pin: str, almacenado: str) -> bool:
+        try:
+            salt_hex, hash_hex = almacenado.split("$")
+            h = hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), cls.ITERACIONES)
+            return h.hex() == hash_hex
         except Exception:
             return False
 
@@ -127,6 +221,16 @@ class GestorBD:
             self.cursor.execute("ALTER TABLE registro_parpadeos ADD COLUMN indice_fatiga TEXT")
         except sqlite3.OperationalError:
             pass
+        # Perfiles: 'windows' = cuenta de la sesión (entra con Windows Hello);
+        # 'perfil' = perfil interno estilo Netflix (PIN propio opcional, hasheado)
+        try:
+            self.cursor.execute("ALTER TABLE usuarios ADD COLUMN tipo TEXT NOT NULL DEFAULT 'perfil'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.cursor.execute("ALTER TABLE usuarios ADD COLUMN pin_hash TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     def obtener_usuarios(self):
@@ -154,15 +258,77 @@ class GestorBD:
         self.cursor.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, usuario_id))
         self.conn.commit()
 
+    # ── Perfiles (login) ─────────────────────────────
+    def obtener_perfiles(self):
+        self.cursor.execute(
+            "SELECT id, nombre, rol, tipo, pin_hash FROM usuarios ORDER BY tipo DESC, nombre")
+        return self.cursor.fetchall()
+
+    def asegurar_usuario_windows(self, nombre):
+        """El usuario de la sesión de Windows siempre existe, con tipo 'windows'
+        y rol Administrador (primera cuenta = administrador)."""
+        self.cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (nombre,))
+        fila = self.cursor.fetchone()
+        if fila:
+            self.cursor.execute(
+                "UPDATE usuarios SET tipo='windows', rol='Administrador' WHERE id = ?", (fila[0],))
+            self.conn.commit()
+            return fila[0]
+        self.cursor.execute(
+            "INSERT INTO usuarios (nombre, rol, tipo) VALUES (?, 'Administrador', 'windows')",
+            (nombre,))
+        self.conn.commit()
+        return self.cursor.lastrowid
+
+    def crear_perfil(self, nombre, pin=None):
+        """Crea un perfil interno (estilo Netflix). PIN opcional, guardado hasheado.
+        Devuelve el id, o None si el nombre ya existe."""
+        pin_hash = GestorPin.hashear(pin) if pin else None
+        try:
+            self.cursor.execute(
+                "INSERT INTO usuarios (nombre, rol, tipo, pin_hash) VALUES (?, 'Usuario', 'perfil', ?)",
+                (nombre, pin_hash))
+            self.conn.commit()
+            return self.cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+
+    def establecer_pin(self, usuario_id, pin):
+        self.cursor.execute("UPDATE usuarios SET pin_hash = ? WHERE id = ?",
+                            (GestorPin.hashear(pin), usuario_id))
+        self.conn.commit()
+
+    def verificar_pin_perfil(self, usuario_id, pin):
+        self.cursor.execute("SELECT pin_hash FROM usuarios WHERE id = ?", (usuario_id,))
+        fila = self.cursor.fetchone()
+        if not fila or not fila[0]:
+            return True  # perfil sin PIN: entra directo
+        return GestorPin.verificar(pin or "", fila[0])
+
     def _migrar_datos_existentes(self):
+        """Cifra registros heredados en texto plano. Corre UNA sola vez: una
+        marca en la tabla meta evita re-escanear la BD en cada arranque.
+        (El chequeo anterior por prefijo 'gAAAAA' era de tokens Fernet; con
+        AES-GCM nunca coincidía y re-cifraba TODO en capas anidadas en cada
+        arranque — así se infló la BD a GB y se colgaba el inicio.)"""
+        self.cursor.execute(
+            "CREATE TABLE IF NOT EXISTS meta (clave TEXT PRIMARY KEY, valor TEXT)")
+        self.cursor.execute("SELECT valor FROM meta WHERE clave = 'migracion_cifrado'")
+        if self.cursor.fetchone():
+            return
+
         self.cursor.execute("SELECT id, fecha_hora, ear_registrado FROM registro_parpadeos")
-        rows = self.cursor.fetchall()
-        for id_, fecha, ear in rows:
-            if not str(fecha).startswith("gAAAAA"):
+        for id_, fecha, ear in self.cursor.fetchall():
+            fecha_s, ear_s = str(fecha), str(ear)
+            # Ya cifrado si descifrar() lo transforma (ante fallo devuelve el
+            # valor intacto → valor intacto = texto plano heredado).
+            if self.cifrado.descifrar(fecha_s) == fecha_s:
                 self.cursor.execute(
                     "UPDATE registro_parpadeos SET fecha_hora=?, ear_registrado=? WHERE id=?",
-                    (self.cifrado.cifrar(str(fecha)), self.cifrado.cifrar(str(ear)), id_)
+                    (self.cifrado.cifrar(fecha_s), self.cifrado.cifrar(ear_s), id_)
                 )
+        self.cursor.execute(
+            "INSERT INTO meta (clave, valor) VALUES ('migracion_cifrado', 'ok')")
         self.conn.commit()
 
     def registrar_parpadeo(self, ear_value, usuario_id=None, nivel_fatiga=None,
@@ -319,38 +485,222 @@ class VentanaEstadisticas(ctk.CTkToplevel):
                     row=ri, column=col, padx=4, pady=1, sticky="ew")
 
 # ==========================================
-# 3.1 VENTANA DE LOGIN (autenticación con Windows)
+# 3.0 DIÁLOGO DE SECRETO (PIN / contraseña, entrada enmascarada)
 # ==========================================
-class VentanaLogin(ctk.CTkToplevel):
-    """Confirma la identidad reusando la sesión de Windows ya iniciada."""
+class DialogoSecreto(ctk.CTkToplevel):
+    """Pide un valor secreto con entrada enmascarada. Resultado en .valor
+    (None si se cancela)."""
 
-    def __init__(self, parent, usuario_windows):
+    def __init__(self, parent, titulo, mensaje):
         super().__init__(parent)
-        self.title("Iniciar sesión")
-        self.geometry("380x220")
+        self.title(titulo)
+        self.geometry("360x180")
         self.resizable(False, False)
+        self.valor = None
         self.protocol("WM_DELETE_WINDOW", self._cancelar)
 
-        self.resultado_ok = False
+        ctk.CTkLabel(self, text=mensaje, wraplength=320).pack(pady=(20, 8))
+        self.entry = ctk.CTkEntry(self, show="•", width=240)
+        self.entry.pack(pady=4)
+        self.entry.bind("<Return>", lambda e: self._aceptar())
 
-        ctk.CTkLabel(self, text="Fatiga Ocular EAR",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(28, 8))
-        ctk.CTkLabel(self, text="Sesión de Windows detectada:",
-                     text_color="gray").pack(pady=(0, 2))
-        ctk.CTkLabel(self, text=usuario_windows,
-                     font=ctk.CTkFont(size=15, weight="bold")).pack(pady=(0, 20))
-
-        frame_btn = ctk.CTkFrame(self, fg_color="transparent")
-        frame_btn.pack(pady=6)
-        ctk.CTkButton(frame_btn, text="Continuar", command=self._continuar).pack(side="left", padx=6)
-        ctk.CTkButton(frame_btn, text="Salir", fg_color="#555", hover_color="#666",
+        fr = ctk.CTkFrame(self, fg_color="transparent")
+        fr.pack(pady=12)
+        ctk.CTkButton(fr, text="Aceptar", width=100, command=self._aceptar).pack(side="left", padx=6)
+        ctk.CTkButton(fr, text="Cancelar", width=100, fg_color="#555", hover_color="#666",
                       command=self._cancelar).pack(side="left", padx=6)
 
         self.lift()
         self.grab_set()
+        self.entry.focus()
 
-    def _continuar(self):
-        self.resultado_ok = True
+    def _aceptar(self):
+        self.valor = self.entry.get()
+        self.grab_release()
+        self.destroy()
+
+    def _cancelar(self):
+        self.valor = None
+        self.grab_release()
+        self.destroy()
+
+# ==========================================
+# 3.1 VENTANA DE LOGIN (perfiles + Windows Hello)
+# ==========================================
+class VentanaLogin(ctk.CTkToplevel):
+    """Selector de perfiles estilo Netflix.
+    - Perfil 'windows' (cuenta de la sesión) = Administrador; entra verificando
+      identidad con Windows Hello (PIN/huella/rostro del propio Windows).
+    - Perfiles internos: PIN propio opcional (hasheado con PBKDF2)."""
+
+    def __init__(self, parent, bd, usuario_windows):
+        super().__init__(parent)
+        self.title("Iniciar sesión — Fatiga Ocular EAR")
+        self.geometry("440x520")
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+
+        self.bd               = bd
+        self.usuario_windows  = usuario_windows
+        self.resultado_ok     = False
+        self.perfil_id        = None
+        self.perfil_nombre    = None
+        self.perfil_rol       = "Usuario"
+        self.hello_disponible = GestorAutenticacionWindows.hello_disponible()
+
+        # La cuenta de la sesión de Windows siempre existe como Administrador
+        self.bd.asegurar_usuario_windows(usuario_windows)
+
+        ctk.CTkLabel(self, text="¿Quién está usando el sistema?",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(22, 4))
+        subtitulo = ("Cuenta de Windows protegida con Windows Hello"
+                     if self.hello_disponible else
+                     "Sin Windows Hello: contraseña de Windows (local) o PIN de app")
+        ctk.CTkLabel(self, text=subtitulo, text_color="gray",
+                     font=ctk.CTkFont(size=11)).pack(pady=(0, 10))
+
+        self.label_error = ctk.CTkLabel(self, text="", text_color="#ff6060",
+                                        font=ctk.CTkFont(size=12, weight="bold"))
+        self.label_error.pack(pady=(0, 2))
+
+        self.lista = ctk.CTkScrollableFrame(self)
+        self.lista.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        self._armar_lista()
+
+        ctk.CTkButton(self, text="+ Crear perfil", fg_color="#555", hover_color="#666",
+                      command=self._crear_perfil).pack(padx=18, pady=(0, 6), fill="x")
+        ctk.CTkButton(self, text="Salir", fg_color="transparent", border_width=1,
+                      command=self._cancelar).pack(padx=18, pady=(0, 14), fill="x")
+
+        self.lift()
+        self.grab_set()
+
+    # ── Lista de perfiles ────────────────────────────
+    def _armar_lista(self):
+        for w in self.lista.winfo_children():
+            w.destroy()
+        for uid, nombre, rol, tipo, pin_hash in self.bd.obtener_perfiles():
+            fila = ctk.CTkFrame(self.lista)
+            fila.pack(fill="x", pady=4)
+            if tipo == "windows":
+                icono, detalle = "🪟", f"{rol} · Windows Hello" if self.hello_disponible else rol
+            else:
+                icono, detalle = "👤", f"{rol} · con PIN" if pin_hash else rol
+            ctk.CTkLabel(fila, text=f"{icono}  {nombre}", anchor="w",
+                         font=ctk.CTkFont(size=14, weight="bold")).pack(
+                side="left", padx=(10, 4), pady=8)
+            ctk.CTkLabel(fila, text=detalle, text_color="gray",
+                         font=ctk.CTkFont(size=11)).pack(side="left")
+            ctk.CTkButton(fila, text="Entrar", width=70,
+                          command=lambda u=uid, n=nombre, r=rol, t=tipo, p=pin_hash:
+                          self._entrar(u, n, r, t, p)).pack(side="right", padx=8)
+
+    # ── Entradas ─────────────────────────────────────
+    def _pedir_secreto(self, titulo, mensaje):
+        d = DialogoSecreto(self, titulo, mensaje)
+        self.wait_window(d)
+        self.grab_set()  # recuperar el foco modal del login
+        return d.valor
+
+    def _entrar(self, uid, nombre, rol, tipo, pin_hash):
+        if getattr(self, "_verificando_hello", False):
+            return  # ya hay una verificación en curso
+        self.label_error.configure(text="")
+        if tipo == "windows":
+            # Cadena de verificación de la cuenta de Windows:
+            #   1) Windows Hello (PIN/huella/cara)   — si está configurado
+            #   2) contraseña de Windows (LogonUser) — cuenta local sin Hello
+            #   3) PIN de app (PBKDF2)               — cuenta Microsoft sin Hello
+            if self.hello_disponible:
+                # En un hilo aparte: asyncio.run() dentro del callback de Tk
+                # congelaba el mainloop (y el diálogo de Hello no tomaba foco).
+                self._verificando_hello = True
+                self._hello_resultado   = None
+                self.label_error.configure(text_color="#ffcc00",
+                                           text="Verificando con Windows Hello...")
+                threading.Thread(
+                    target=self._hello_worker,
+                    args=(f"Confirmá tu identidad para entrar como {nombre}",),
+                    daemon=True).start()
+                self._esperar_hello(uid, nombre, rol)
+                return
+            elif not GestorAutenticacionWindows.es_cuenta_microsoft(nombre):
+                pwd = self._pedir_secreto("Contraseña de Windows",
+                                          f"Contraseña de Windows de {nombre}:")
+                if pwd is None:
+                    return
+                if not GestorAutenticacionWindows.validar_password_local(nombre, pwd):
+                    self.label_error.configure(text="Contraseña de Windows incorrecta.")
+                    return
+            else:
+                if pin_hash:
+                    pin = self._pedir_secreto("PIN de la aplicación",
+                                              f"PIN de la aplicación de {nombre}:")
+                    if pin is None:
+                        return
+                    if not self.bd.verificar_pin_perfil(uid, pin):
+                        self.label_error.configure(text="PIN incorrecto.")
+                        return
+                else:
+                    # Primera vez: crear el PIN de app (cuenta Microsoft sin Hello)
+                    pin = self._pedir_secreto("Crear PIN",
+                                              "Sin Windows Hello disponible: creá un PIN "
+                                              "para proteger esta cuenta (primera vez).")
+                    if not pin:
+                        self.label_error.configure(text="Se necesita un PIN para continuar.")
+                        return
+                    pin2 = self._pedir_secreto("Confirmar PIN", "Repetí el PIN:")
+                    if pin != pin2:
+                        self.label_error.configure(text="Los PIN no coinciden.")
+                        return
+                    self.bd.establecer_pin(uid, pin)
+            self._aceptar(uid, nombre, rol)
+        else:
+            if pin_hash:
+                pin = self._pedir_secreto("PIN del perfil", f"PIN del perfil {nombre}:")
+                if pin is None:
+                    return
+                if not self.bd.verificar_pin_perfil(uid, pin):
+                    self.label_error.configure(text="PIN incorrecto.")
+                    return
+            self._aceptar(uid, nombre, rol)
+
+    def _hello_worker(self, mensaje):
+        self._hello_resultado = GestorAutenticacionWindows.verificar_hello(mensaje)
+
+    def _esperar_hello(self, uid, nombre, rol):
+        """Espera el resultado del hilo de Hello sin bloquear el mainloop."""
+        if self._hello_resultado is None:
+            self.after(100, lambda: self._esperar_hello(uid, nombre, rol))
+            return
+        ok = self._hello_resultado
+        self._verificando_hello = False
+        self.label_error.configure(text_color="#ff6060", text="")
+        if ok:
+            self._aceptar(uid, nombre, rol)
+        else:
+            self.label_error.configure(text="Verificación de Windows Hello fallida.")
+
+    def _crear_perfil(self):
+        self.label_error.configure(text="")
+        d = ctk.CTkInputDialog(text="Nombre del nuevo perfil:", title="Crear perfil")
+        nombre = (d.get_input() or "").strip()
+        self.grab_set()
+        if not nombre:
+            return
+        pin = (self._pedir_secreto("PIN del perfil",
+                                   "PIN para el perfil (vacío = sin PIN):") or "").strip()
+        nuevo_id = self.bd.crear_perfil(nombre, pin if pin else None)
+        if nuevo_id is None:
+            self.label_error.configure(text=f"Ya existe un perfil llamado '{nombre}'.")
+            return
+        self._armar_lista()
+
+    def _aceptar(self, uid, nombre, rol):
+        self.resultado_ok  = True
+        self.perfil_id     = uid
+        self.perfil_nombre = nombre
+        self.perfil_rol    = rol
         self.grab_release()
         self.destroy()
 
@@ -532,7 +882,7 @@ class InterfazFatiga(ctk.CTk):
         ("D", "Reposo", "Quieto, ojos ABIERTOS, tratá de NO parpadear",                  10, 0,    "falso"),
     ]
 
-    def __init__(self, usuario_windows):
+    def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
         super().__init__()
         print("DEBUG: InterfazFatiga.__init__ iniciado")
         self.title("Sistema Inteligente - Fatiga Ocular (EAR)")
@@ -548,10 +898,11 @@ class InterfazFatiga(ctk.CTk):
         self.sistema_activo    = False
         self.camara_visible    = False
         self.cap               = None
-        self.usuario_id        = None
-        self.usuario_nombre    = usuario_windows
-        self.rol_actual        = "Usuario"
+        self.usuario_id        = perfil_id
+        self.usuario_nombre    = perfil_nombre
+        self.rol_actual        = perfil_rol
         self.nariz_previa      = None
+        self.cerrar_sesion_solicitado = False  # True → __main__ vuelve al login
 
         # Auto-calibración (auto-ajustar todo)
         # fases: 0=idle 1=ajuste de imagen 2=ojos abiertos 3=parpadeando 4=done
@@ -630,15 +981,9 @@ class InterfazFatiga(ctk.CTk):
         self.p_contraste   = DEFAULTS["contraste"]
         self.p_clahe       = DEFAULTS["clahe"]
 
-        print("DEBUG: Creando GestorBD...")
-        self.bd = GestorBD()
-        print("DEBUG: GestorBD creado.")
-
-        es_admin_win = GestorAutenticacionWindows.es_admin_windows(usuario_windows)
-        print(f"DEBUG: ¿Es admin Windows? {es_admin_win}")
-        self.usuario_id, self.rol_actual = self.bd.obtener_o_crear_usuario(
-            usuario_windows, "Administrador" if es_admin_win else "Usuario")
-        print(f"DEBUG: Usuario BD id={self.usuario_id}, rol={self.rol_actual}")
+        # BD y perfil ya resueltos por VentanaLogin (perfil autenticado)
+        self.bd = bd
+        print(f"DEBUG: Perfil activo id={self.usuario_id}, nombre={self.usuario_nombre}, rol={self.rol_actual}")
 
         self.ear_buffer    = deque(maxlen=self.p_buffer_ear)
         self.historico_ear = deque(maxlen=150)  # ~5s de EAR crudo (abierto + cerrado) para umbral por percentiles
@@ -706,10 +1051,16 @@ class InterfazFatiga(ctk.CTk):
         self.geometry("310x660")
 
     def _tab_control(self, tab):
-        # Usuario (identidad = sesión de Windows autenticada al iniciar)
+        # Usuario (identidad verificada en el login) + botón de cerrar sesión
         ctk.CTkLabel(tab, text="Usuario:", anchor="w").pack(fill="x", padx=10)
-        ctk.CTkLabel(tab, text=f"{self.usuario_nombre}  ({self.rol_actual})",
-                     anchor="w", font=ctk.CTkFont(weight="bold")).pack(fill="x", padx=10, pady=(2, 8))
+        fila_usuario = ctk.CTkFrame(tab, fg_color="transparent")
+        fila_usuario.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(fila_usuario, text=f"{self.usuario_nombre}  ({self.rol_actual})",
+                     anchor="w", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkButton(fila_usuario, text="🚪", width=34, height=28,
+                      font=ctk.CTkFont(size=15),
+                      fg_color="#8a2a2a", hover_color="#aa3a3a",
+                      command=self._cerrar_sesion).pack(side="right")
 
         if self.rol_actual == "Administrador":
             ctk.CTkButton(tab, text="Gestionar Usuarios", fg_color="#555", hover_color="#666",
@@ -1630,10 +1981,17 @@ class InterfazFatiga(ctk.CTk):
         if self.sistema_activo:
             self.after(10, self.actualizar_video)
 
+    def _cerrar_sesion(self):
+        """Cierra la ventana y vuelve al selector de perfiles (bucle en __main__)."""
+        self.cerrar_sesion_solicitado = True
+        self.on_closing()
+
     def on_closing(self):
+        # La BD no se cierra acá: es compartida con el bucle login↔app de
+        # __main__ (se cierra al salir definitivamente de la aplicación).
+        self.sistema_activo = False
         if self.cap:
             self.cap.release()
-        self.bd.cerrar()
         self.face_landmarker.close()
         self.destroy()
 
@@ -1643,32 +2001,38 @@ class InterfazFatiga(ctk.CTk):
 if __name__ == "__main__":
     print("DEBUG: Inicio de la aplicación.")
     try:
-        # --- 1. Obtener usuario de Windows ---
+        # --- 1. Obtener usuario de Windows y abrir BD ---
         usuario_windows = GestorAutenticacionWindows.usuario_actual()
         print(f"DEBUG: Usuario Windows detectado: {usuario_windows}")
+        bd = GestorBD()
+        print(f"DEBUG: BD abierta. Windows Hello disponible: "
+              f"{GestorAutenticacionWindows.hello_disponible()}")
 
-        # --- 2. Mostrar ventana de login como raíz ---
-        print("DEBUG: Creando ventana de login...")
-        login_root = ctk.CTk()  # ventana temporal oculta
-        login_root.withdraw()   # la ocultamos inmediatamente
-        login = VentanaLogin(login_root, usuario_windows)
-        login_root.wait_window(login)
-
-        if not login.resultado_ok:
-            print("DEBUG: Login cancelado, saliendo.")
+        # --- 2. Bucle login ↔ aplicación (Cerrar Sesión vuelve al selector) ---
+        while True:
+            print("DEBUG: Creando ventana de login...")
+            login_root = ctk.CTk()  # ventana temporal oculta
+            login_root.withdraw()   # la ocultamos inmediatamente
+            login = VentanaLogin(login_root, bd, usuario_windows)
+            login_root.wait_window(login)
             login_root.destroy()
-            sys.exit(0)
 
-        login_root.destroy()  # destruir la ventana oculta
-        print("DEBUG: Login aceptado, lanzando InterfazFatiga...")
+            if not login.resultado_ok:
+                print("DEBUG: Login cancelado, saliendo.")
+                break
 
-        # --- 3. Crear la aplicación principal ---
-        app = InterfazFatiga(usuario_windows)
-        print("DEBUG: Instancia creada, configurando protocolo de cierre...")
-        app.protocol("WM_DELETE_WINDOW", app.on_closing)
-        print("DEBUG: Entrando en mainloop...")
-        app.mainloop()
-        print("DEBUG: mainloop finalizado.")
+            print(f"DEBUG: Login OK — perfil '{login.perfil_nombre}' ({login.perfil_rol})")
+            app = InterfazFatiga(login.perfil_nombre, login.perfil_id, login.perfil_rol, bd)
+            app.protocol("WM_DELETE_WINDOW", app.on_closing)
+            print("DEBUG: Entrando en mainloop...")
+            app.mainloop()
+            print("DEBUG: mainloop finalizado.")
+
+            if not app.cerrar_sesion_solicitado:
+                break  # cierre normal de la app → salir del todo
+            print("DEBUG: Sesión cerrada, volviendo al selector de perfiles...")
+
+        bd.cerrar()
     except Exception as e:
         print("ERROR CAPTURADO:")
         traceback.print_exc()

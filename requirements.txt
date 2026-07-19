@@ -5,3 +5,6 @@ Pillow==12.2.0
 cryptography==48.0.0
 pywin32==312
 matplotlib==3.11.0
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Security.Credentials.UI==3.2.1
