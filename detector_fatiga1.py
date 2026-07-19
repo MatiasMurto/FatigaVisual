@@ -38,9 +38,55 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
+def _dir_recursos():
+    """Carpeta de recursos empaquetados de solo-lectura (modelo, assets).
+    En el .exe de PyInstaller apunta al bundle; con `python`, a la del script."""
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _dir_datos():
+    """Carpeta donde la app ESCRIBE (base de datos, clave). Junto al .exe
+    cuando está compilado; junto al script cuando corre con `python`."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
-KEY_PATH   = os.path.join(os.path.dirname(__file__), "secret.key")
+MODEL_PATH = os.path.join(_dir_recursos(), "face_landmarker.task")
+KEY_PATH   = os.path.join(_dir_datos(), "secret.key")
+
+# Recursos gráficos (logo Argos). Generados por generar_assets.py desde Ojo.svg.
+ASSETS_DIR = os.path.join(_dir_recursos(), "assets")
+ICON_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.ico")
+LOGO_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.png")
+
+
+def aplicar_icono(ventana):
+    """Aplica el ícono del ojo a una ventana. Reintenta con after() porque en
+    los Toplevel de customtkinter el ícono a veces no toma en el primer intento."""
+    if not os.path.exists(ICON_PATH):
+        return
+    def _set():
+        try:
+            ventana.iconbitmap(ICON_PATH)
+        except Exception:
+            pass
+    _set()
+    try:
+        ventana.after(300, _set)
+    except Exception:
+        pass
+
+
+def cargar_logo(size):
+    """Devuelve un CTkImage del logo, o None si falta el archivo."""
+    try:
+        return ctk.CTkImage(Image.open(LOGO_PATH), size=size)
+    except Exception:
+        return None
 
 # ==========================================
 # 0. CIFRADO SIMÉTRICO (AES-GCM)
@@ -170,7 +216,9 @@ class GestorPin:
 # 1. GESTOR DE BASE DE DATOS
 # ==========================================
 class GestorBD:
-    def __init__(self, db_name="fatiga_ocular.db"):
+    def __init__(self, db_name=None):
+        if db_name is None:
+            db_name = os.path.join(_dir_datos(), "fatiga_ocular.db")
         self.conn    = sqlite3.connect(db_name)
         self.cursor  = self.conn.cursor()
         self.cifrado = GestorCifrado()
@@ -433,12 +481,79 @@ class CalculadorEAR:
         return (v1 + v2) / (2.0 * h)
 
 # ==========================================
+# 2.5 PANTALLA DE CARGA (splash con ojo que parpadea)
+# ==========================================
+class VentanaCarga(ctk.CTkToplevel):
+    """Splash inicial: el ojo de Argos parpadea mientras se prepara el sistema.
+    Sin bordes, centrado, se cierra solo tras unos segundos."""
+
+    DURACION_MS = 2800
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.overrideredirect(True)
+        self.configure(fg_color="#0A0E17")
+        w, h = 380, 340
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        try:
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        # Frames de parpadeo: abierto → semi → cerrado → semi (ciclo)
+        self._frames = []
+        for nombre in ("ojo_abierto.png", "ojo_semi.png", "ojo_cerrado.png", "ojo_semi.png"):
+            try:
+                self._frames.append(
+                    ctk.CTkImage(Image.open(os.path.join(ASSETS_DIR, nombre)), size=(120, 120)))
+            except Exception:
+                pass
+
+        self.lbl_ojo = ctk.CTkLabel(self, text="", image=self._frames[0] if self._frames else None)
+        self.lbl_ojo.pack(pady=(48, 14))
+        ctk.CTkLabel(self, text="ARGOS",
+                     font=ctk.CTkFont(size=28, weight="bold")).pack()
+        ctk.CTkLabel(self, text="Monitor de fatiga visual",
+                     text_color="gray").pack(pady=(2, 18))
+        self.lbl_log = ctk.CTkLabel(self, text="Iniciando…", text_color="#8A93A8",
+                                    font=ctk.CTkFont(size=11))
+        self.lbl_log.pack()
+
+        self._i = 0
+        self._vivo = True
+        if self._frames:
+            self._animar()
+        self._paso_log(0)
+        self.after(self.DURACION_MS, self._cerrar)
+        self.lift()
+
+    def _animar(self):
+        if not self._vivo:
+            return
+        self.lbl_ojo.configure(image=self._frames[self._i % len(self._frames)])
+        self._i += 1
+        self.after(240, self._animar)
+
+    def _paso_log(self, k):
+        msgs = ["Cargando modelo FaceLandmarker…", "Iniciando MediaPipe…",
+                "Preparando base de datos…", "Listo."]
+        if self._vivo and k < len(msgs):
+            self.lbl_log.configure(text=msgs[k])
+            self.after(650, lambda: self._paso_log(k + 1))
+
+    def _cerrar(self):
+        self._vivo = False
+        self.destroy()
+
+# ==========================================
 # 3. VENTANA DE ESTADÍSTICAS
 # ==========================================
 class VentanaEstadisticas(ctk.CTkToplevel):
     def __init__(self, parent, bd, usuario_id=None, usuario_nombre="Todos"):
         super().__init__(parent)
         self.title(f"Estadísticas — {usuario_nombre}")
+        aplicar_icono(self)
         self.geometry("980x560")
         self.resizable(False, False)
         self.lift()
@@ -535,7 +650,7 @@ class VentanaLogin(ctk.CTkToplevel):
 
     def __init__(self, parent, bd, usuario_windows):
         super().__init__(parent)
-        self.title("Iniciar sesión — Fatiga Ocular EAR")
+        self.title("Iniciar sesión — Argos")
         self.geometry("440x520")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._cancelar)
@@ -550,9 +665,15 @@ class VentanaLogin(ctk.CTkToplevel):
 
         # La cuenta de la sesión de Windows siempre existe como Administrador
         self.bd.asegurar_usuario_windows(usuario_windows)
+        aplicar_icono(self)
 
+        self._logo = cargar_logo((56, 56))
+        if self._logo:
+            ctk.CTkLabel(self, text="", image=self._logo).pack(pady=(20, 2))
+        ctk.CTkLabel(self, text="ARGOS",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(2 if self._logo else 20, 0))
         ctk.CTkLabel(self, text="¿Quién está usando el sistema?",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(22, 4))
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(8, 4))
         subtitulo = ("Cuenta de Windows protegida con Windows Hello"
                      if self.hello_disponible else
                      "Sin Windows Hello: contraseña de Windows (local) o PIN de app")
@@ -718,6 +839,7 @@ class VentanaGestionUsuarios(ctk.CTkToplevel):
     def __init__(self, parent, bd):
         super().__init__(parent)
         self.title("Gestión de Usuarios")
+        aplicar_icono(self)
         self.geometry("420x360")
         self.bd = bd
         self.lift()
@@ -757,6 +879,7 @@ class VentanaGraficoEAR(ctk.CTkToplevel):
     def __init__(self, parent, app):
         super().__init__(parent)
         self.title("EAR en tiempo real")
+        aplicar_icono(self)
         self.geometry("640x420")
         self.app      = app
         self._cerrado = False
@@ -793,6 +916,85 @@ class VentanaGraficoEAR(ctk.CTkToplevel):
         self.after(200, self._refrescar)
 
 # ==========================================
+# 3.35 VENTANA "ACERCA DE" (pestañas)
+# ==========================================
+class VentanaAcercaDe(ctk.CTkToplevel):
+    """Información del proyecto: origen del nombre Argos, el sistema y los creadores."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Acerca de Argos")
+        aplicar_icono(self)
+        self.geometry("560x520")
+        self.resizable(False, False)
+        self.lift()
+        self.focus()
+
+        ctk.CTkLabel(self, text="ARGOS", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 0))
+        ctk.CTkLabel(self, text="Argos Panoptes — «el que todo lo ve»",
+                     text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=(0, 12))
+
+        tabs = ctk.CTkTabview(self)
+        tabs.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        tabs.add("¿Por qué Argos?")
+        tabs.add("El sistema")
+        tabs.add("Creadores")
+        self._tab_por_que(tabs.tab("¿Por qué Argos?"))
+        self._tab_sistema(tabs.tab("El sistema"))
+        self._tab_creadores(tabs.tab("Creadores"))
+
+    def _tab_por_que(self, tab):
+        texto = (
+            "En la mitología griega, Argos Panoptes era un gigante de cien ojos "
+            "repartidos por todo el cuerpo. Su don no era solo ver: era no dejar de "
+            "hacerlo. Cuando descansaba, cerraba apenas unos pocos ojos y mantenía el "
+            "resto despiertos, de modo que su vigilancia nunca se interrumpía.\n\n"
+            "«Panoptes», el que todo lo observa: el guardián al que nada se le escapa, "
+            "ni siquiera durante el sueño.\n\n"
+            "Ese centinela incansable da nombre al sistema. Argos observa los ojos del "
+            "usuario en tiempo real para detectar el instante en que aparece la fatiga "
+            "—cuando los párpados empiezan a vencer a la voluntad—, justo aquello que el "
+            "Argos mitológico jamás se permitía. Donde el gigante vigilaba sin dormir, "
+            "nuestro Argos vigila para avisar cuándo es momento de descansar."
+        )
+        ctk.CTkLabel(tab, text=texto, wraplength=480, justify="left",
+                     font=ctk.CTkFont(size=13)).pack(padx=16, pady=16, anchor="w")
+
+    def _tab_sistema(self, tab):
+        ctk.CTkLabel(tab, text="Argos combina visión por computadora y métricas validadas "
+                     "para estimar la fatiga visual de forma no invasiva, solo con la cámara.",
+                     wraplength=480, justify="left").pack(padx=16, pady=(16, 10), anchor="w")
+        items = [
+            ("Detección EAR", "Eye Aspect Ratio con MediaPipe FaceLandmarker y baseline adaptativo."),
+            ("PERCLOS", "Porcentaje de tiempo con ojos cerrados, indicador validado de somnolencia."),
+            ("Índice de fatiga", "Puntaje 0–100 que pondera duración, frecuencia y microsueños."),
+            ("Prueba guiada", "Protocolo de validación por fases: verifica que la detección sea correcta."),
+        ]
+        for titulo, desc in items:
+            f = ctk.CTkFrame(tab)
+            f.pack(fill="x", padx=16, pady=4)
+            ctk.CTkLabel(f, text=titulo, anchor="w",
+                         font=ctk.CTkFont(size=13, weight="bold")).pack(fill="x", padx=12, pady=(8, 0))
+            ctk.CTkLabel(f, text=desc, anchor="w", justify="left", wraplength=440,
+                         text_color="gray", font=ctk.CTkFont(size=11)).pack(fill="x", padx=12, pady=(0, 8))
+
+    def _tab_creadores(self, tab):
+        ctk.CTkLabel(tab, text="Proyecto de tesis desarrollado por:",
+                     anchor="w").pack(padx=16, pady=(16, 8), anchor="w")
+        for iniciales, nombre in [("TM", "Tobias Molinas"), ("MM", "Matias Murto")]:
+            f = ctk.CTkFrame(tab)
+            f.pack(fill="x", padx=16, pady=6)
+            ctk.CTkLabel(f, text=iniciales, width=48, height=48,
+                         font=ctk.CTkFont(size=16, weight="bold"),
+                         fg_color="#2a6b6b", corner_radius=12).pack(side="left", padx=12, pady=12)
+            caja = ctk.CTkFrame(f, fg_color="transparent")
+            caja.pack(side="left", padx=(4, 0))
+            ctk.CTkLabel(caja, text=nombre, anchor="w",
+                         font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(caja, text="Desarrollo · Investigación", anchor="w",
+                         text_color="gray", font=ctk.CTkFont(size=11)).pack(anchor="w")
+
+# ==========================================
 # 3.4 VENTANA DE RESUMEN DE LA PRUEBA GUIADA (validación)
 # ==========================================
 class VentanaResumenPrueba(ctk.CTkToplevel):
@@ -802,6 +1004,7 @@ class VentanaResumenPrueba(ctk.CTkToplevel):
     def __init__(self, parent, fases, conteos):
         super().__init__(parent)
         self.title("Resumen de la prueba guiada")
+        aplicar_icono(self)
         self.geometry("580x430")
         self.resizable(False, False)
         self.lift()
@@ -885,8 +1088,9 @@ class InterfazFatiga(ctk.CTk):
     def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
         super().__init__()
         print("DEBUG: InterfazFatiga.__init__ iniciado")
-        self.title("Sistema Inteligente - Fatiga Ocular (EAR)")
+        self.title("Argos — Monitor de Fatiga Visual")
         self.geometry("1050x660")
+        aplicar_icono(self)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -1030,8 +1234,13 @@ class InterfazFatiga(ctk.CTk):
         panel.grid(row=0, column=0, sticky="nsew")
         panel.grid_propagate(False)
 
-        ctk.CTkLabel(panel, text="Fatiga Ocular EAR",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 8))
+        self._logo_panel = cargar_logo((44, 44))
+        if self._logo_panel:
+            ctk.CTkLabel(panel, text="", image=self._logo_panel).pack(pady=(14, 2))
+        ctk.CTkLabel(panel, text="ARGOS",
+                     font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(2 if self._logo_panel else 16, 0))
+        ctk.CTkLabel(panel, text="Monitor de fatiga visual",
+                     font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(0, 8))
 
         tabs = ctk.CTkTabview(panel)
         tabs.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -1082,13 +1291,20 @@ class InterfazFatiga(ctk.CTk):
                                                 wraplength=260, justify="left")
         self.label_calib_estado.pack(padx=10, pady=(0, 4))
 
-        self.btn_camara = ctk.CTkButton(tab, text="Mostrar Cámara", command=self.toggle_camara,
-                                         fg_color="#555", hover_color="#666")
-        self.btn_camara.pack(padx=10, pady=4, fill="x")
-
         self.btn_guia = ctk.CTkButton(tab, text="Prueba Guiada", command=self._iniciar_prueba_guiada,
                                        fg_color="#2a5b8a", hover_color="#3a7bba")
         self.btn_guia.pack(padx=10, pady=4, fill="x")
+
+        # Interruptores de visualización (mostrar/ocultar información en pantalla)
+        frame_sw = ctk.CTkFrame(tab, fg_color="transparent")
+        frame_sw.pack(fill="x", padx=10, pady=(4, 2))
+        ctk.CTkLabel(frame_sw, text="Mostrar en pantalla:", anchor="w",
+                     font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").pack(fill="x")
+        self.sw_camara = ctk.CTkSwitch(frame_sw, text="Cámara", command=self._sw_camara)
+        self.sw_camara.pack(anchor="w", pady=(4, 2))   # apagado por defecto
+        self.sw_metricas = ctk.CTkSwitch(frame_sw, text="Métricas en vivo", command=self._sw_metricas)
+        self.sw_metricas.select()                      # encendido por defecto
+        self.sw_metricas.pack(anchor="w", pady=2)
 
         ctk.CTkButton(tab, text="Ver Estadísticas", command=self.abrir_estadisticas,
                       fg_color="#2a6b2a", hover_color="#3a8b3a").pack(padx=10, pady=4, fill="x")
@@ -1099,52 +1315,62 @@ class InterfazFatiga(ctk.CTk):
 
         ctk.CTkFrame(tab, height=1, fg_color="#444").pack(fill="x", padx=8, pady=6)
 
-        # Métricas
+        # Estado del sistema (siempre visible)
         self.label_estado = ctk.CTkLabel(tab, text="Estado: INACTIVO", text_color="gray")
         self.label_estado.pack(padx=10, pady=2, anchor="w")
 
-        ctk.CTkLabel(tab, text="Tiempo real:",
+        # Métricas en vivo (bloque ocultable con el interruptor "Métricas en vivo")
+        self.frame_metricas = ctk.CTkFrame(tab, fg_color="transparent")
+        self.frame_metricas.pack(fill="x")
+        mf = self.frame_metricas
+
+        ctk.CTkLabel(mf, text="Tiempo real:",
                      font=ctk.CTkFont(size=12, weight="bold")).pack(padx=10, pady=(8, 2), anchor="w")
 
-        self.label_ear       = ctk.CTkLabel(tab, text="EAR:              0.000", anchor="w")
+        self.label_ear       = ctk.CTkLabel(mf, text="EAR:              0.000", anchor="w")
         self.label_ear.pack(padx=10, pady=1, fill="x")
 
-        self.label_parpadeos = ctk.CTkLabel(tab, text="Parpadeos:        0", anchor="w")
+        self.label_parpadeos = ctk.CTkLabel(mf, text="Parpadeos:        0", anchor="w")
         self.label_parpadeos.pack(padx=10, pady=1, fill="x")
 
-        self.label_prolongados = ctk.CTkLabel(tab, text="Prolongados:      0", anchor="w",
+        self.label_prolongados = ctk.CTkLabel(mf, text="Prolongados:      0", anchor="w",
                                               text_color="#ff9040")
         self.label_prolongados.pack(padx=10, pady=1, fill="x")
 
-        self.label_falsos = ctk.CTkLabel(tab, text="Falsos descart.:  0", anchor="w",
+        self.label_falsos = ctk.CTkLabel(mf, text="Falsos descart.:  0", anchor="w",
                                          text_color="#888")
         self.label_falsos.pack(padx=10, pady=1, fill="x")
 
-        self.label_bpm = ctk.CTkLabel(tab, text="Frecuencia:       0 / min",
+        self.label_bpm = ctk.CTkLabel(mf, text="Frecuencia:       0 / min",
                                        text_color="cyan", anchor="w")
         self.label_bpm.pack(padx=10, pady=1, fill="x")
 
-        self.label_perclos = ctk.CTkLabel(tab, text="PERCLOS:          0.0 %",
+        self.label_perclos = ctk.CTkLabel(mf, text="PERCLOS:          0.0 %",
                                            text_color="orange", anchor="w")
         self.label_perclos.pack(padx=10, pady=1, fill="x")
 
-        self.label_indice = ctk.CTkLabel(tab, text="Índice Fatiga:    0.0 (Normal)",
+        self.label_indice = ctk.CTkLabel(mf, text="Índice Fatiga:    0.0 (Normal)",
                                           anchor="w", font=ctk.CTkFont(weight="bold"))
         self.label_indice.pack(padx=10, pady=1, fill="x")
 
-        self.label_estado_ojo = ctk.CTkLabel(tab, text="Ojo:              —",
+        self.label_estado_ojo = ctk.CTkLabel(mf, text="Ojo:              —",
                                               anchor="w", text_color="#aaa")
         self.label_estado_ojo.pack(padx=10, pady=1, fill="x")
 
-        self.label_fps = ctk.CTkLabel(tab, text="FPS:              0",
+        self.label_fps = ctk.CTkLabel(mf, text="FPS:              0",
                                       anchor="w", text_color="#888")
         self.label_fps.pack(padx=10, pady=1, fill="x")
 
+        # Alerta (siempre visible, fuera del bloque ocultable)
         self.label_alerta = ctk.CTkLabel(tab, text="", text_color="red",
                                           font=ctk.CTkFont(size=13, weight="bold"))
         self.label_alerta.pack(padx=10, pady=8)
 
-        ctk.CTkButton(tab, text="Ver Gráfica EAR", command=self._abrir_grafico_ear,
+        botones_extra = ctk.CTkFrame(tab, fg_color="transparent")
+        botones_extra.pack(fill="x")
+        ctk.CTkButton(botones_extra, text="Ver Gráfica EAR", command=self._abrir_grafico_ear,
+                      fg_color="#555", hover_color="#666").pack(padx=10, pady=(0, 4), fill="x")
+        ctk.CTkButton(botones_extra, text="Acerca de Argos", command=self._abrir_acerca_de,
                       fg_color="#555", hover_color="#666").pack(padx=10, pady=(0, 4), fill="x")
 
     def _tab_calibracion(self, tab):
@@ -1431,11 +1657,25 @@ class InterfazFatiga(ctk.CTk):
         if self.camara_visible:
             self.frame_derecho.grid()
             self.geometry("1050x660")
-            self.btn_camara.configure(text="Ocultar Cámara")
         else:
             self.frame_derecho.grid_remove()
             self.geometry("310x660")
-            self.btn_camara.configure(text="Mostrar Cámara")
+
+    def _sw_camara(self):
+        """Interruptor de cámara: sincroniza el switch con la visibilidad real."""
+        quiere_visible = bool(self.sw_camara.get())
+        if quiere_visible != self.camara_visible:
+            self.toggle_camara()
+
+    def _sw_metricas(self):
+        """Interruptor: muestra u oculta el bloque de métricas en vivo."""
+        if self.sw_metricas.get():
+            self.frame_metricas.pack(fill="x", after=self.label_estado)
+        else:
+            self.frame_metricas.pack_forget()
+
+    def _abrir_acerca_de(self):
+        VentanaAcercaDe(self)
 
     def abrir_estadisticas(self):
         VentanaEstadisticas(self, self.bd, self.usuario_id, self.usuario_nombre)
@@ -2004,6 +2244,15 @@ if __name__ == "__main__":
         # --- 1. Obtener usuario de Windows y abrir BD ---
         usuario_windows = GestorAutenticacionWindows.usuario_actual()
         print(f"DEBUG: Usuario Windows detectado: {usuario_windows}")
+
+        # --- 1.5 Pantalla de carga (splash con el ojo de Argos parpadeando) ---
+        print("DEBUG: Mostrando pantalla de carga...")
+        splash_root = ctk.CTk()
+        splash_root.withdraw()
+        carga = VentanaCarga(splash_root)
+        splash_root.wait_window(carga)
+        splash_root.destroy()
+
         bd = GestorBD()
         print(f"DEBUG: BD abierta. Windows Hello disponible: "
               f"{GestorAutenticacionWindows.hello_disponible()}")

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('face_landmarker.task', '.')]
+datas = [('face_landmarker.task', '.'), ('assets', 'assets')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('customtkinter')
@@ -34,7 +34,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='FatigaOcular',
+    name='Argos',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -45,6 +45,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/logo_ojo.ico',
 )
 coll = COLLECT(
     exe,
@@ -53,5 +54,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='FatigaOcular',
+    name='Argos',
 )
