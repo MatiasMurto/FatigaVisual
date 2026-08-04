@@ -609,6 +609,7 @@ class VentanaLogin(ctk.CTkToplevel):
     def __init__(self, parent, bd, usuario_windows):
         super().__init__(parent)
         self.title("Iniciar sesión — Argos")
+        #self.state("zoomed")
         self.geometry("480x560")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._cancelar)
@@ -1088,7 +1089,11 @@ class InterfazFatiga(ctk.CTk):
 
     # ── Construcción UI ──────────────────────────────
     def _construir_ui(self):
-        self.geometry("1150x700")
+        ancho = self.winfo_screenwidth()
+        alto = self.winfo_screenheight()
+        self.geometry(f"{ancho}x{alto}+0+0")
+        #self.state("zoomed")
+        #self.geometry("1150x700")
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
