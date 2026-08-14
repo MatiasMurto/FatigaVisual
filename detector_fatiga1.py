@@ -1,3 +1,4 @@
+#from curses.panel import panel
 import traceback  # para depuración
 import cv2
 import mediapipe as mp
@@ -23,6 +24,7 @@ import win32api
 import win32net
 import win32security
 import winreg
+from datetime import datetime
 
 # Windows Hello (pywinrt). Import opcional: si falta el paquete o falla,
 # la app sigue funcionando con el flujo sin verificación biométrica.
@@ -62,6 +64,7 @@ KEY_PATH   = os.path.join(_dir_datos(), "secret.key")
 ASSETS_DIR = os.path.join(_dir_recursos(), "assets")
 ICON_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.ico")
 LOGO_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.png")
+SPLASH_LOGO_PATH = os.path.join(ASSETS_DIR, "argos_logo_transparente.png")
 
 
 def aplicar_icono(ventana):
@@ -503,7 +506,7 @@ class VentanaCarga(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.overrideredirect(True)
-        self.configure(fg_color="#0A0E17")
+        self.configure(fg_color="#050B12")
         w, h = 380, 340
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
@@ -512,8 +515,11 @@ class VentanaCarga(ctk.CTkToplevel):
         except Exception:
             pass
 
-        # Frames de parpadeo: abierto → semi → cerrado → semi (ciclo)
-        self._frames = []
+  #===============================================================================================
+  #===============================================================================================
+
+        # Frames de parpadeo - Antiguo Splash
+        """self._frames = []
         for nombre in ("ojo_abierto.png", "ojo_semi.png", "ojo_cerrado.png", "ojo_semi.png"):
             try:
                 self._frames.append(
@@ -522,29 +528,71 @@ class VentanaCarga(ctk.CTkToplevel):
                 pass
 
         self.lbl_ojo = ctk.CTkLabel(self, text="", image=self._frames[0] if self._frames else None)
-        self.lbl_ojo.pack(pady=(48, 14))
-        ctk.CTkLabel(self, text="ARGOS",
-                     font=ctk.CTkFont(size=28, weight="bold")).pack()
-        ctk.CTkLabel(self, text="Monitor de fatiga visual",
-                     text_color="gray").pack(pady=(2, 18))
+        self.lbl_ojo.pack(pady=(48, 14))"""
+        
+        try:
+            self.logo_splash = ctk.CTkImage(
+                Image.open(SPLASH_LOGO_PATH),
+                size=(185, 185)
+        )
+        except Exception:
+            self.logo_splash = None
+
+        self.lbl_ojo = ctk.CTkLabel(
+            self,
+            text="",
+            image=self.logo_splash
+        )
+        self.lbl_ojo.pack(pady=(0,0))
+        
+  #===============================================================================================
+  #===============================================================================================
+
+        
+        ctk.CTkLabel(self, text="A R G O S",
+                     font=ctk.CTkFont(family="Agency FB",size=38, weight="bold")).pack(pady=(0, 12))
+        
+        ctk.CTkLabel(self, 
+                    text="Monitor de Fatiga Visual",
+                    text_color="#8A93A8",
+                    font=ctk.CTkFont(
+                        family="Agency FB",
+                        size=20,
+                        weight="normal"
+                    )
+                ).pack(pady=(2, 18))
+        
+
         self.lbl_log = ctk.CTkLabel(self, text="Iniciando…", text_color="#8A93A8",
-                                    font=ctk.CTkFont(size=11))
+                                    font=ctk.CTkFont(family="Agency FB",
+                                                            size=15,
+                                                            weight="normal"))
         self.lbl_log.pack()
 
-        self._i = 0
+ 
+ #==================================================================
+#==================================================================       
+        """self._i = 0
         self._vivo = True
         if self._frames:
-            self._animar()
+            self._animar()          -------------------> Del antiguo Splash
+        self._paso_log(0)
+        self.after(self.DURACION_MS, self._cerrar)
+        self.lift()"""
+        
+        self._vivo = True
         self._paso_log(0)
         self.after(self.DURACION_MS, self._cerrar)
         self.lift()
-
-    def _animar(self):
+        
+#==================================================================
+#==================================================================
+    """def _animar(self):
         if not self._vivo:
             return
         self.lbl_ojo.configure(image=self._frames[self._i % len(self._frames)])
         self._i += 1
-        self.after(240, self._animar)
+        self.after(240, self._animar)"""
 
     def _paso_log(self, k):
         msgs = ["Cargando modelo FaceLandmarker…", "Iniciando MediaPipe…",
@@ -566,6 +614,7 @@ class DialogoSecreto(ctk.CTkToplevel):
 
     def __init__(self, parent, titulo, mensaje):
         super().__init__(parent)
+        self.configure(fg_color="#050B12")
         self.title(titulo)
         self.geometry("360x180")
         self.resizable(False, False)
@@ -608,7 +657,8 @@ class VentanaLogin(ctk.CTkToplevel):
 
     def __init__(self, parent, bd, usuario_windows):
         super().__init__(parent)
-        self.title("Iniciar sesión — Argos")
+        self.configure(fg_color="#050B12")
+        self.title("Iniciar sesión")
         #self.state("zoomed")
         self.geometry("480x560")
         self.resizable(False, False)
@@ -626,7 +676,18 @@ class VentanaLogin(ctk.CTkToplevel):
         self.bd.asegurar_usuario_windows(usuario_windows)
         aplicar_icono(self)
 
-        self._logo = cargar_logo((56, 56))
+
+        self._logo = ctk.CTkImage(
+            light_image=Image.open(
+                os.path.join(ASSETS_DIR, "argos_logo_transparente.png")
+            ),
+            dark_image=Image.open(
+                os.path.join(ASSETS_DIR, "argos_logo_transparente.png")
+            ),
+        size=(140, 140)
+   )
+        
+        
         if self._logo:
             ctk.CTkLabel(self, text="", image=self._logo).pack(pady=(20, 2))
         ctk.CTkLabel(self, text="ARGOS",
@@ -925,7 +986,479 @@ DEFAULTS = {
     "clahe":       3.5,
 }
 
-class InterfazFatiga(ctk.CTk):
+#=================================================
+# ================================================
+# Clase del Menu Principal
+#=================================================
+#===============================================
+#=================================================
+
+class MenuPrincipal(ctk.CTk):
+    
+    
+
+    def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
+        super().__init__()
+        
+        self.configure(fg_color="#050B12")
+        
+        
+        
+        self.perfil_nombre = perfil_nombre
+        self.perfil_id = perfil_id
+        self.perfil_rol = perfil_rol
+        self.bd = bd
+        
+        self.cerrar_sesion_solicitado = False # Nuevo 
+
+        self.title("ARGOS")
+        self.after(100, self._maximizar)
+        
+
+        aplicar_icono(self)
+
+        # Zona de navegación izquierda
+        self.panel_navegacion = ctk.CTkFrame(
+            self, 
+            fg_color ="transparent"
+        )
+        
+        self.panel_navegacion.pack(
+            side="left",
+            fill="y",
+            padx=30,
+            pady=30
+        )
+        
+        self.contenedor_botones = ctk.CTkFrame(
+            self.panel_navegacion,
+            fg_color="transparent"
+        )
+
+        self.contenedor_botones.pack(
+            expand=True
+        )
+        
+    #=====================================================================
+        # Zona - Botones ==================================================
+    #=====================================================================
+    
+        self.titulo_argos = ctk.CTkLabel(
+            self.panel_navegacion,
+            text="A  R  G  O  S",
+            font=("Agency FB", 52),
+            text_color="#E8EDF2",
+            fg_color="transparent"
+        )
+        
+        self.linea_argos = ctk.CTkFrame(
+            self.panel_navegacion,
+            height=2,
+            width=180,
+            fg_color="#1B526F"
+        )
+
+        self.linea_argos.place(
+            relx=0.5,
+            y=110,
+            anchor="center"
+        )
+        
+        self.linea_argos.lift()
+# ========================================Fecha y Hora ==================================================================       
+       
+        self.lbl_fecha = ctk.CTkLabel(
+            self,
+            text="",
+            font=ctk.CTkFont(
+                family="Consolas",
+                size=13,
+                weight="normal"
+            ),
+            text_color="#AEB8C2",
+            fg_color="transparent",
+            justify="right"
+        )
+
+        self.lbl_fecha.place(
+            relx=0.94,
+            y=55,
+            anchor="ne"
+        )
+        
+        
+        self.lbl_hora = ctk.CTkLabel(
+            self,
+            text="",
+            font=ctk.CTkFont(
+                family="Consolas",
+                size=13,
+                weight="normal"
+            ),
+            text_color="#AEB8C2",
+            fg_color="transparent",
+            justify="right"
+        )
+
+        self.lbl_hora.place(
+            relx=0.94,
+            y=78,
+            anchor="ne"
+        )
+        
+        self._actualizar_fecha_hora()
+        
+# Fin Fecha y Hora ==================================================================
+
+        self.titulo_argos.place(
+            relx=0.5,
+            y=70,
+            anchor="center"
+        )
+
+        ctk.CTkButton(
+            self.contenedor_botones,
+            text="M O N I T O R E O",
+            width=250,
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=18,
+                weight="normal"
+            ),
+            
+            fg_color="transparent",
+            hover_color="#10283A",
+            text_color="#C8D0D8",
+            corner_radius=0,
+            command=self.abrir_monitoreo
+        ).pack(pady=(12))
+        
+       
+       #=====================================================================
+        
+        ctk.CTkButton(
+            self.contenedor_botones,
+            text="E S T A D I S T I C A S",
+            width=250,
+            
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=18,
+                weight="normal"
+            ),
+            fg_color="transparent",
+            hover_color="#10283A",
+            text_color="#C8D0D8",
+            corner_radius=0,
+         ).pack(pady=(12))
+        
+
+        ctk.CTkButton(
+            self.contenedor_botones,
+            text="E S T A D.  T O T A L E S",
+            width=250,
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=18,
+                weight="normal"
+            ),
+            fg_color="transparent",
+            hover_color="#10283A",
+            text_color="#C8D0D8",
+            corner_radius=0
+        ).pack(pady=(12))
+
+        
+
+        
+        ctk.CTkButton(
+            self.contenedor_botones,
+            text="U S U A R I O S",
+            width=250,
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=18,
+                weight="normal"
+            ),
+            fg_color="transparent",
+            hover_color="#10283A",
+            text_color="#C8D0D8",
+            corner_radius=0,
+        ).pack(pady=(12))
+        
+        ctk.CTkButton(
+            self.contenedor_botones,
+            text="A C E R C A  D E",
+            width=250,
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=18,
+                weight="normal"
+            ),
+            fg_color="transparent",
+            hover_color="#10283A",
+            text_color="#C8D0D8",
+            corner_radius=0,
+            command=self.mostrar_about
+        ).pack(pady=(12))
+        
+#================================================================================================================
+#==========================================================
+# Comtenido en pantalla
+#===========================================================
+#==========================================================
+        # Área principal de contenido
+        self.area_contenido = ctk.CTkFrame(
+            self,
+            fg_color="transparent"
+        )
+
+        self.area_contenido.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=30,
+            pady=30
+        )
+        
+        self.vista_about = ctk.CTkFrame(
+            self.area_contenido,
+            fg_color="transparent"
+        )
+        
+        self._construir_vista_about(self.vista_about)
+        
+    # Informacion del sitema 
+            
+        self.lbl_sistema = ctk.CTkLabel(
+            self,
+            text="●  ARGOS OS v1.0.0",
+            font=ctk.CTkFont(
+                family="Consolas",
+                size=11,
+                weight="normal"
+            ),
+            text_color="#5F7180",
+            fg_color="transparent"
+        )
+    
+        self.lbl_sistema.place( 
+            relx=0.05,
+            rely=0.95,
+            anchor="sw"
+        )
+    #Fin Informacion del sistema
+    
+        self.lbl_fecha.lift()
+        self.lbl_hora.lift()
+#============================= Actualizar fecha y hora =============================================================================
+    def _actualizar_fecha_hora(self):
+        ahora = datetime.now()
+
+        self.lbl_fecha.configure(
+            text=ahora.strftime("%d / %m / %Y")
+        )
+
+        self.lbl_hora.configure(
+            text=ahora.strftime("%H : %M : %S")
+        )
+
+        self.after(1000, self._actualizar_fecha_hora)   
+    
+#============================= Fin Actualizar fecha y hora =======================================================
+    
+    def _construir_vista_about(self, tab):
+        ctk.CTkLabel(
+            tab,
+            text="ARGOS",
+            font=ctk.CTkFont(size=22, weight="bold")
+        ).pack(pady=(0, 0))
+
+        ctk.CTkLabel(
+            tab,
+            text="Argos Panoptes — El gigante que todo lo ve",
+            text_color="gray",
+            font=ctk.CTkFont(size=12)
+        ).pack(pady=(0, 12))
+
+        tabs = ctk.CTkTabview(tab)
+        tabs.pack(fill="both", expand=True)
+
+        tabs.add("¿Por qué Argos?")
+        tabs.add("El sistema")
+        tabs.add("Creadores")
+
+        self._about_por_que(tabs.tab("¿Por qué Argos?"))
+        self._about_sistema(tabs.tab("El sistema"))
+        self._about_creadores(tabs.tab("Creadores"))
+
+
+    def _about_por_que(self, tab):
+        texto = (
+            "En la mitología griega, Argos Panoptes era un gigante de cien ojos "
+            "repartidos por todo el cuerpo. Su don no era solo ver: era no dejar de "
+            "hacerlo. Cuando descansaba, cerraba apenas unos pocos ojos y mantenía el "
+            "resto despiertos, de modo que su vigilancia nunca se interrumpía.\n\n"
+            "«Panoptes», el que todo lo observa: el guardián al que nada se le escapa, "
+            "ni siquiera durante el sueño.\n\n"
+            "Ese centinela incansable da nombre al sistema. Argos observa los ojos del "
+            "usuario en tiempo real para detectar el instante en que aparece la fatiga "
+            "—cuando los párpados empiezan a vencer a la voluntad—, justo aquello que el "
+            "Argos mitológico jamás se permitía. Donde el gigante vigilaba sin dormir, "
+            "nuestro Argos vigila para avisar cuándo es momento de descansar."
+        )
+
+        ctk.CTkLabel(
+            tab,
+            text=texto,
+            wraplength=560,
+            justify="left",
+            font=ctk.CTkFont(size=13)
+        ).pack(padx=16, pady=16, anchor="w")
+
+
+    def _about_sistema(self, tab):
+        ctk.CTkLabel(
+            tab,
+            text="Argos combina visión por computadora y métricas validadas "
+                "para estimar la fatiga visual de forma no invasiva, solo con la cámara.",
+            wraplength=560,
+            justify="left"
+        ).pack(padx=16, pady=(16, 10), anchor="w")
+
+        items = [
+            ("Detección EAR", "Eye Aspect Ratio con MediaPipe FaceLandmarker y baseline adaptativo."),
+            ("PERCLOS", "Porcentaje de tiempo con ojos cerrados, indicador validado de somnolencia."),
+            ("Índice de fatiga", "Puntaje 0–100 que pondera duración, frecuencia y microsueños."),
+            ("Prueba guiada", "Protocolo de validación por fases: verifica que la detección sea correcta."),
+        ]
+
+        for titulo, desc in items:
+            f = ctk.CTkFrame(tab)
+            f.pack(fill="x", padx=16, pady=4)
+
+            ctk.CTkLabel(
+                f,
+                text=titulo,
+                anchor="w",
+                font=ctk.CTkFont(size=13, weight="bold")
+            ).pack(fill="x", padx=12, pady=(8, 0))
+
+            ctk.CTkLabel(
+                f,
+                text=desc,
+                anchor="w",
+                justify="left",
+                wraplength=520,
+                text_color="gray",
+                font=ctk.CTkFont(size=11)
+            ).pack(fill="x", padx=12, pady=(0, 8))
+
+
+    def _about_creadores(self, tab):
+        ctk.CTkLabel(
+            tab,
+            text="Proyecto de tesis desarrollado por:",
+            anchor="w"
+        ).pack(padx=16, pady=(16, 8), anchor="w")
+
+        for iniciales, nombre in [
+            ("TM", "Tobias Molinas"),
+            ("MM", "Matias Murto")
+        ]:
+            f = ctk.CTkFrame(tab)
+            f.pack(fill="x", padx=16, pady=6)
+
+            ctk.CTkLabel(
+                f,
+                text=iniciales,
+                width=48,
+                height=48,
+                font=ctk.CTkFont(size=16, weight="bold"),
+                fg_color="#2a6b6b",
+                corner_radius=12
+            ).pack(side="left", padx=12, pady=12)
+
+            caja = ctk.CTkFrame(
+                f,
+                fg_color="transparent"
+            )
+            caja.pack(side="left", padx=(4, 0))
+
+            ctk.CTkLabel(
+                caja,
+                text=nombre,
+                anchor="w",
+                font=ctk.CTkFont(size=14, weight="bold")
+            ).pack(anchor="w")
+
+            ctk.CTkLabel(
+                caja,
+                text="Desarrollo · Investigación",
+                anchor="w",
+                text_color="gray",
+                font=ctk.CTkFont(size=11)
+            ).pack(anchor="w")
+
+        #==============================================================================================================
+#===========================================================
+#==========================================================
+    def _maximizar(self):
+        self.state("zoomed")
+        self.lift()
+        self.focus_force()
+        
+    def on_closing(self):
+        self.cerrar_sesion_solicitado = False
+        self.destroy()
+        
+    def abrir_monitoreo(self):
+
+        self.monitoreo = InterfazFatiga(
+            self,
+            self.perfil_nombre,
+            self.perfil_id,
+            self.perfil_rol,
+            self.bd
+    )
+
+        self.monitoreo.protocol(
+            "WM_DELETE_WINDOW",
+            self.volver_desde_monitoreo
+    )
+
+        self.withdraw()
+        
+    def volver_desde_monitoreo(self):
+        if self.monitoreo is not None:
+            self.monitoreo.destroy()
+            self.monitoreo = None
+
+        self.deiconify()
+        self.state("zoomed")
+        self.lift()
+        self.focus_force()
+        
+    def mostrar_about(self):
+        for widget in self.area_contenido.winfo_children():
+            widget.pack_forget()
+
+        # Mostrar Acerca de
+        self.vista_about.pack(
+            fill="both",
+            expand=True
+    )
+        
+        
+        
+
+#========================================
+#========================================
+# INTERFAZ FATIGA:
+#========================================
+#========================================
+
+class InterfazFatiga(ctk.CTkToplevel):
     # Pesos del índice de fatiga ponderado (PERCLOS/duración/frecuencia/
     # cierres prolongados/variabilidad EAR). Son valores ilustrativos, no
     # validados empíricamente: ajustar con datos reales antes de citarlos
@@ -949,10 +1482,11 @@ class InterfazFatiga(ctk.CTk):
         ("D", "Reposo", "Quieto, ojos ABIERTOS, tratá de NO parpadear",                  10, 0,    "falso"),
     ]
 
-    def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
-        super().__init__()
+    def __init__(self, parent, perfil_nombre, perfil_id, perfil_rol, bd):
+        super().__init__(parent)
+        self.configure(fg_color="#050B12")
         print("DEBUG: InterfazFatiga.__init__ iniciado")
-        self.title("Argos — Monitor de Fatiga Visual")
+        self.title("Monitoreo de fatiga visual")
         aplicar_icono(self)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -969,8 +1503,10 @@ class InterfazFatiga(ctk.CTk):
         self.usuario_nombre    = perfil_nombre
         self.rol_actual        = perfil_rol
         self.nariz_previa      = None
-        self.cerrar_sesion_solicitado = False  # True → __main__ vuelve al login
-
+        self.cerrar_sesion_solicitado = False
+        
+        # True → __main__ vuelve al login
+        self.monitoreo = None
         # Auto-calibración (auto-ajustar todo)
         # fases: 0=idle 1=ajuste de imagen 2=ojos abiertos 3=parpadeando 4=done
         self.calib_fase            = 0
@@ -1087,6 +1623,8 @@ class InterfazFatiga(ctk.CTk):
         self.timestamp_ms    = 0
         print("DEBUG: FaceLandmarker creado.")
 
+    def _volver_al_menu(self):
+        self.master.volver_desde_monitoreo()
     # ── Construcción UI ──────────────────────────────
     def _construir_ui(self):
         ancho = self.winfo_screenwidth()
@@ -1099,16 +1637,23 @@ class InterfazFatiga(ctk.CTk):
 
         # Sidebar: SOLO navegación (estilo taskbar/dock). El contenido de
         # cada sección vive en el panel principal ancho de la derecha.
-        panel = ctk.CTkFrame(self, width=240, corner_radius=0)
+        panel = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color="#050B12")
         panel.grid(row=0, column=0, sticky="nsew")
         panel.grid_propagate(False)
+        
+        # Botón para volver al menú principal
+        ctk.CTkButton(
+            panel,
+            text="← Volver al menú",
+            command=self._volver_al_menu
+        ).pack(fill="x", padx=12, pady=(10, 5))
 
         self._logo_panel = cargar_logo((38, 38))
         if self._logo_panel:
             ctk.CTkLabel(panel, text="", image=self._logo_panel).pack(pady=(14, 2))
         ctk.CTkLabel(panel, text="ARGOS",
                      font=ctk.CTkFont(size=19, weight="bold")).pack(pady=(2 if self._logo_panel else 14, 0))
-        ctk.CTkLabel(panel, text="Monitor de fatiga visual",
+        ctk.CTkLabel(panel, text="Sistema de monitoreo de fatiga visual",
                      font=ctk.CTkFont(size=10), text_color="gray").pack(pady=(0, 10))
 
         # Perfil activo + cerrar sesión (persistente, no forma parte de la navegación)
@@ -1163,12 +1708,10 @@ class InterfazFatiga(ctk.CTk):
                                   lambda: self._mostrar_vista("stats_todos"))
         self._crear_nav_item(nav_frame, "chart", "chart", "Gráfica EAR",
                               lambda: self._mostrar_vista("chart"))
-        self._crear_nav_item(nav_frame, "about", "about", "Acerca de Argos",
-                              lambda: self._mostrar_vista("about"))
 
         # ── Panel principal (ancho): una vista a la vez ──
         self._grafico_activo = False
-        principal = ctk.CTkFrame(self, corner_radius=0)
+        principal = ctk.CTkFrame(self, corner_radius=0, fg_color="#050B12")
         principal.grid(row=0, column=1, sticky="nsew", padx=16, pady=16)
 
         self.vista_control = ctk.CTkFrame(principal, fg_color="transparent")
@@ -1189,8 +1732,21 @@ class InterfazFatiga(ctk.CTk):
 
         self.vista_about = ctk.CTkFrame(principal, fg_color="transparent")
         self._construir_vista_about(self.vista_about)
+        
 
         self._mostrar_vista("control")
+
+#
+# Volver al menú principal 
+#
+    def _volver_al_menu(self):
+        self.sistema_activo = False
+
+        if self.cap:
+          self.cap.release()
+          self.cap = None
+
+        self.master.volver_desde_monitoreo()
 
     def _crear_nav_item(self, parent, key, icono_nombre, texto, command):
         """Botón de navegación estilo rail (ícono dibujado + texto, sin
@@ -1497,6 +2053,12 @@ class InterfazFatiga(ctk.CTk):
         self._chart_figure.tight_layout()
         self._chart_canvas.draw()
         self.after(200, self._refrescar_grafico)
+        
+      #===========================================================================================    
+    #===========================================================================================
+    # Antigua vista de About (ahora movidaa menu principal)
+     #===========================================================================================    
+        #===========================================================================================
 
     def _construir_vista_about(self, tab):
         ctk.CTkLabel(tab, text="ARGOS", font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(0, 0))
@@ -1562,6 +2124,14 @@ class InterfazFatiga(ctk.CTk):
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             ctk.CTkLabel(caja, text="Desarrollo · Investigación", anchor="w",
                          text_color="gray", font=ctk.CTkFont(size=11)).pack(anchor="w")
+            
+            
+            
+#===========================================================================================    
+#===========================================================================================
+    # Fin Acerca de
+#===========================================================================================    
+#===========================================================================================
 
     # ── Auto-calibración (auto-ajustar todo) ─────────
     def _iniciar_auto_calibracion(self):
@@ -2392,8 +2962,10 @@ if __name__ == "__main__":
                 print("DEBUG: Login cancelado, saliendo.")
                 break
 
+#===========Aca hice un cambio en la linea 2438===========================
+
             print(f"DEBUG: Login OK — perfil '{login.perfil_nombre}' ({login.perfil_rol})")
-            app = InterfazFatiga(login.perfil_nombre, login.perfil_id, login.perfil_rol, bd)
+            app = MenuPrincipal(login.perfil_nombre, login.perfil_id, login.perfil_rol, bd)
             app.protocol("WM_DELETE_WINDOW", app.on_closing)
             print("DEBUG: Entrando en mainloop...")
             app.mainloop()
