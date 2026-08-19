@@ -24,6 +24,7 @@ import win32api
 import win32net
 import win32security
 import winreg
+from PIL import Image, ImageTk
 from datetime import datetime
 
 # Windows Hello (pywinrt). Import opcional: si falta el paquete o falla,
@@ -65,6 +66,7 @@ ASSETS_DIR = os.path.join(_dir_recursos(), "assets")
 ICON_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.ico")
 LOGO_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.png")
 SPLASH_LOGO_PATH = os.path.join(ASSETS_DIR, "argos_logo_transparente.png")
+SPLASH_BG_PATH = os.path.join(ASSETS_DIR, "menu_inicial.png")
 
 
 def aplicar_icono(ventana):
@@ -507,13 +509,32 @@ class VentanaCarga(ctk.CTkToplevel):
         super().__init__(parent)
         self.overrideredirect(True)
         self.configure(fg_color="#050B12")
+
         w, h = 380, 340
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
         try:
             self.attributes("-topmost", True)
         except Exception:
             pass
+
+        # Fondo del Splash
+        try:
+            self.splash_bg = ctk.CTkImage(
+                Image.open(SPLASH_BG_PATH),
+                size=(w, h)
+            )
+        except Exception:
+            self.splash_bg = None
+
+        self.lbl_fondo = ctk.CTkLabel(
+            self,
+            text="",
+            image=self.splash_bg
+        )
+        self.lbl_fondo.place(x=0, y=0, relwidth=1, relheight=1)
+        self.lbl_fondo.lower()
 
   #===============================================================================================
   #===============================================================================================
@@ -533,7 +554,7 @@ class VentanaCarga(ctk.CTkToplevel):
         try:
             self.logo_splash = ctk.CTkImage(
                 Image.open(SPLASH_LOGO_PATH),
-                size=(185, 185)
+                size=(150, 150)
         )
         except Exception:
             self.logo_splash = None
@@ -543,7 +564,7 @@ class VentanaCarga(ctk.CTkToplevel):
             text="",
             image=self.logo_splash
         )
-        self.lbl_ojo.pack(pady=(0,0))
+        self.lbl_ojo.pack(pady=(10,8))
         
   #===============================================================================================
   #===============================================================================================
@@ -684,24 +705,59 @@ class VentanaLogin(ctk.CTkToplevel):
             dark_image=Image.open(
                 os.path.join(ASSETS_DIR, "argos_logo_transparente.png")
             ),
-        size=(140, 140)
+        size=(180, 180)
    )
         
         
         if self._logo:
             ctk.CTkLabel(self, text="", image=self._logo).pack(pady=(20, 2))
-        ctk.CTkLabel(self, text="ARGOS",
-                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(2 if self._logo else 20, 0))
-        ctk.CTkLabel(self, text="¿Quién está usando el sistema?",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(8, 4))
+        
+        ctk.CTkLabel(
+            self,
+            text="A  R  G  O  S",
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=38,
+                weight="bold"
+            )
+        ).pack(pady=(2 if self._logo else 20, 0))
+        
+        
+        ctk.CTkLabel(
+                self,
+                text="¿Quién está usando el sistema?",
+                font=ctk.CTkFont(
+                    family="Agency FB",
+                    size=22,
+                    weight="bold"
+                )
+            ).pack(pady=(8, 4))
+        
+        
         subtitulo = ("Cuenta de Windows protegida con Windows Hello"
                      if self.hello_disponible else
                      "Sin Windows Hello: contraseña de Windows (local) o PIN de app")
-        ctk.CTkLabel(self, text=subtitulo, text_color="gray",
-                     font=ctk.CTkFont(size=11)).pack(pady=(0, 10))
+        
+        ctk.CTkLabel(
+            self,
+            text=subtitulo,
+            text_color="#8A93A8",
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=18
+            )
+        ).pack(pady=(0, 10))
 
-        self.label_error = ctk.CTkLabel(self, text="", text_color="#ff6060",
-                                        font=ctk.CTkFont(size=12, weight="bold"))
+        self.label_error = ctk.CTkLabel(
+            self,
+            text="",
+            text_color="#ff6060",
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=15,
+                weight="bold"
+            )
+        )
         self.label_error.pack(pady=(0, 2))
 
         self.lista = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -709,9 +765,17 @@ class VentanaLogin(ctk.CTkToplevel):
         self.lista.grid_columnconfigure((0, 1), weight=1)
         self._armar_lista()
 
-        ctk.CTkButton(self, text="Salir", fg_color="transparent", border_width=1,
-                      command=self._cancelar).pack(padx=18, pady=(0, 14), fill="x")
-
+        ctk.CTkButton(
+            self,
+            text="Salir",
+            fg_color="transparent",
+            border_width=1,
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=17
+            ),
+            command=self._cancelar
+        ).pack(padx=18, pady=(0, 14), fill="x")
         self.lift()
         self.grab_set()
 
@@ -730,23 +794,71 @@ class VentanaLogin(ctk.CTkToplevel):
                 color_avatar = "#3a3a3a"
             iniciales = "".join(p[0] for p in nombre.split()[:2]).upper() or "?"
 
-            card = ctk.CTkFrame(self.lista, corner_radius=10)
-            card.grid(row=idx // COLS, column=idx % COLS, padx=6, pady=6, sticky="nsew")
+            card = ctk.CTkFrame(
+                self.lista,
+                corner_radius=10,
+                fg_color="transparent"
+            )
+            card.grid(
+                row=idx // COLS,
+                column=idx % COLS,
+                padx=6,
+                pady=6,
+                sticky="nsew"
+            )
 
             avatar = ctk.CTkFrame(card, width=64, height=64, corner_radius=32,
                                    fg_color=color_avatar)
             avatar.pack(pady=(16, 8))
             avatar.pack_propagate(False)
-            ctk.CTkLabel(avatar, text=iniciales,
-                         font=ctk.CTkFont(size=18, weight="bold")).pack(expand=True)
+            
+            
+            ctk.CTkLabel(
+                avatar,
+                text=iniciales,
+                font=ctk.CTkFont(
+                    family="Agency FB",
+                    size=20,
+                    weight="bold"
+                )
+            ).pack(expand=True)
 
-            ctk.CTkLabel(card, text=nombre, font=ctk.CTkFont(size=13, weight="bold"),
-                         wraplength=150).pack(padx=10)
-            ctk.CTkLabel(card, text=detalle, text_color="gray", font=ctk.CTkFont(size=10),
-                         wraplength=150, justify="center").pack(padx=10, pady=(0, 10))
-            ctk.CTkButton(card, text="Entrar", width=110,
-                          command=lambda u=uid, n=nombre, r=rol, t=tipo, p=pin_hash:
-                          self._entrar(u, n, r, t, p)).pack(pady=(0, 14))
+
+            ctk.CTkLabel(
+                card,   
+                text=nombre,
+                font=ctk.CTkFont(
+                    family="Agency FB",
+                    size=17,
+                    weight="bold"
+                ),
+                wraplength=150
+            ).pack(padx=10)
+            
+            
+            ctk.CTkLabel(
+                card,
+                text=detalle,
+                text_color="#8A93A8",
+                font=ctk.CTkFont(
+                    family="Agency FB",
+                    size=16
+                ),
+                wraplength=150,
+                justify="center"
+            ).pack(padx=10, pady=(0, 10))
+            
+            ctk.CTkButton(
+                card,
+                text="Entrar",
+                width=110,
+                font=ctk.CTkFont(
+                    family="Agency FB",
+                    size=17
+                ),
+                command=lambda u=uid, n=nombre, r=rol, t=tipo, p=pin_hash:
+                    self._entrar(u, n, r, t, p)
+            ).pack(pady=(0, 14))
 
         # Tarjeta "+ Crear perfil" al final de la grilla
         idx_add = len(perfiles)
@@ -759,8 +871,18 @@ class VentanaLogin(ctk.CTkToplevel):
         avatar_add.pack_propagate(False)
         ctk.CTkLabel(avatar_add, text="+", text_color="gray",
                      font=ctk.CTkFont(size=22)).pack(expand=True)
-        ctk.CTkLabel(card_add, text="Crear perfil", text_color="gray",
-                     font=ctk.CTkFont(size=12)).pack(padx=10, pady=(0, 14))
+        
+        
+        ctk.CTkLabel(
+            card_add,
+            text="Crear perfil",
+            text_color="#8A93A8",
+            font=ctk.CTkFont(
+                family="Agency FB",
+                size=15
+            )
+        ).pack(padx=10, pady=(0, 14))
+        
         card_add.bind("<Button-1>", lambda e: self._crear_perfil())
         avatar_add.bind("<Button-1>", lambda e: self._crear_perfil())
         for child in card_add.winfo_children():
@@ -994,7 +1116,6 @@ DEFAULTS = {
 #=================================================
 
 class MenuPrincipal(ctk.CTk):
-    
     
 
     def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
