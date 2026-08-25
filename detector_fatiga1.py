@@ -24,7 +24,8 @@ import win32api
 import win32net
 import win32security
 import winreg
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
+import os
 from datetime import datetime
 
 # Windows Hello (pywinrt). Import opcional: si falta el paquete o falla,
@@ -585,8 +586,8 @@ class VentanaCarga(ctk.CTkToplevel):
         
 
         self.lbl_log = ctk.CTkLabel(self, text="Iniciando…", text_color="#8A93A8",
-                                    font=ctk.CTkFont(family="Agency FB",
-                                                            size=15,
+                                    font=ctk.CTkFont(family="Consolas",
+                                                            size=14,
                                                             weight="normal"))
         self.lbl_log.pack()
 
@@ -712,23 +713,40 @@ class VentanaLogin(ctk.CTkToplevel):
         if self._logo:
             ctk.CTkLabel(self, text="", image=self._logo).pack(pady=(20, 2))
         
-        ctk.CTkLabel(
+        self.titulo_argos = ctk.CTkLabel(
             self,
             text="A  R  G  O  S",
             font=ctk.CTkFont(
                 family="Agency FB",
                 size=38,
                 weight="bold"
-            )
-        ).pack(pady=(2 if self._logo else 20, 0))
+            ),
+            text_color="#E8EDF2"
+        )
+
+        self.titulo_argos.pack(
+            pady=(2 if self._logo else 20, 0)
+        )
+
+        self.linea_argos = ctk.CTkFrame(
+            self,
+            height=2,
+            width=150,
+            fg_color="#1B526F"
+        )
+
+        self.linea_argos.pack(
+            pady=(3, 4)
+        )
         
         
+
         ctk.CTkLabel(
                 self,
                 text="¿Quién está usando el sistema?",
                 font=ctk.CTkFont(
                     family="Agency FB",
-                    size=22,
+                    size=20,
                     weight="bold"
                 )
             ).pack(pady=(8, 4))
@@ -743,8 +761,8 @@ class VentanaLogin(ctk.CTkToplevel):
             text=subtitulo,
             text_color="#8A93A8",
             font=ctk.CTkFont(
-                family="Agency FB",
-                size=18
+                family="Consolas",
+                size=13
             )
         ).pack(pady=(0, 10))
 
@@ -1117,14 +1135,58 @@ DEFAULTS = {
 
 class MenuPrincipal(ctk.CTk):
     
-
     def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
         super().__init__()
         
         self.configure(fg_color="#050B12")
         
+        ruta_fondo = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets",
+            "menu_inicial.png"
+        )
+#================================================================   
+        self.imagen_fondo_original = Image.open(ruta_fondo)
+
+        ancho = self.winfo_screenwidth()
+        alto = self.winfo_screenheight()
+
+        imagen_ajustada = ImageOps.fit(
+            self.imagen_fondo_original,
+            (ancho, alto),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5)
+        )
+
+        self.imagen_fondo = ctk.CTkImage(
+            light_image=imagen_ajustada,
+            dark_image=imagen_ajustada,
+            size=(ancho, alto)  
+        )
         
+        # ================================================================
+# Mostrar fondo
+# ================================================================
+
+        self.fondo_menu = ctk.CTkLabel(
+            self,
+            text="",
+            image=self.imagen_fondo,
+            fg_color="transparent"
+        )
+
+        self.fondo_menu.place(
+            relx=0,
+            rely=0,
+            relwidth=1,
+            relheight=1
+        )
+
+        self.fondo_menu.lower()
+
+# ================================================================
         
+        #===================================================================    
         self.perfil_nombre = perfil_nombre
         self.perfil_id = perfil_id
         self.perfil_rol = perfil_rol
@@ -1138,7 +1200,8 @@ class MenuPrincipal(ctk.CTk):
 
         aplicar_icono(self)
 
-        # Zona de navegación izquierda
+
+        """# Zona de navegación izquierda
         self.panel_navegacion = ctk.CTkFrame(
             self, 
             fg_color ="transparent"
@@ -1153,35 +1216,42 @@ class MenuPrincipal(ctk.CTk):
         
         self.contenedor_botones = ctk.CTkFrame(
             self.panel_navegacion,
-            fg_color="transparent"
-        )
+            fg_color="#D0D5DA"
+        )                                                   # ANTIGUO FONDO DE BOTONES
 
         self.contenedor_botones.pack(
             expand=True
-        )
+        )"""
         
     #=====================================================================
         # Zona - Botones ==================================================
     #=====================================================================
     
         self.titulo_argos = ctk.CTkLabel(
-            self.panel_navegacion,
+            self,
             text="A  R  G  O  S",
             font=("Agency FB", 52),
             text_color="#E8EDF2",
             fg_color="transparent"
         )
+        self.titulo_argos.place(
+            x=195,
+            y=125,
+            anchor="center"
+        )
+
+        self.titulo_argos.lift()
         
         self.linea_argos = ctk.CTkFrame(
-            self.panel_navegacion,
+            self,
             height=2,
             width=180,
             fg_color="#1B526F"
         )
 
         self.linea_argos.place(
-            relx=0.5,
-            y=110,
+            x=195,
+            y=180,
             anchor="center"
         )
         
@@ -1231,14 +1301,14 @@ class MenuPrincipal(ctk.CTk):
         
 # Fin Fecha y Hora ==================================================================
 
-        self.titulo_argos.place(
-            relx=0.5,
-            y=70,
+        """self.titulo_argos.place(
+            relx=70,
+            y=45,
             anchor="center"
-        )
+        )"""
 
         ctk.CTkButton(
-            self.contenedor_botones,
+            self,
             text="M O N I T O R E O",
             width=250,
             font=ctk.CTkFont(
@@ -1252,13 +1322,16 @@ class MenuPrincipal(ctk.CTk):
             text_color="#C8D0D8",
             corner_radius=0,
             command=self.abrir_monitoreo
-        ).pack(pady=(12))
+        ).place(
+            x=70,
+            y=260
+        )
         
        
        #=====================================================================
         
         ctk.CTkButton(
-            self.contenedor_botones,
+            self,
             text="E S T A D I S T I C A S",
             width=250,
             
@@ -1271,11 +1344,14 @@ class MenuPrincipal(ctk.CTk):
             hover_color="#10283A",
             text_color="#C8D0D8",
             corner_radius=0,
-         ).pack(pady=(12))
+         ).place(
+            x=70,
+            y=310
+        )
         
 
         ctk.CTkButton(
-            self.contenedor_botones,
+            self,
             text="E S T A D.  T O T A L E S",
             width=250,
             font=ctk.CTkFont(
@@ -1287,13 +1363,14 @@ class MenuPrincipal(ctk.CTk):
             hover_color="#10283A",
             text_color="#C8D0D8",
             corner_radius=0
-        ).pack(pady=(12))
-
-        
+        ).place(
+            x=70,
+            y=360
+        )
 
         
         ctk.CTkButton(
-            self.contenedor_botones,
+            self,
             text="U S U A R I O S",
             width=250,
             font=ctk.CTkFont(
@@ -1305,10 +1382,13 @@ class MenuPrincipal(ctk.CTk):
             hover_color="#10283A",
             text_color="#C8D0D8",
             corner_radius=0,
-        ).pack(pady=(12))
+        ).place(
+            x=70,
+            y=410
+        )
         
         ctk.CTkButton(
-            self.contenedor_botones,
+            self,
             text="A C E R C A  D E",
             width=250,
             font=ctk.CTkFont(
@@ -1321,29 +1401,31 @@ class MenuPrincipal(ctk.CTk):
             text_color="#C8D0D8",
             corner_radius=0,
             command=self.mostrar_about
-        ).pack(pady=(12))
-        
+        ).place(
+            x=70,
+            y=460
+        )
 #================================================================================================================
 #==========================================================
 # Comtenido en pantalla
 #===========================================================
 #==========================================================
-        # Área principal de contenido
+        """# Área principal de contenido
         self.area_contenido = ctk.CTkFrame(
             self,
-            fg_color="transparent"
+            fg_color="#E1E5E8"
         )
 
-        self.area_contenido.pack(
+        self.area_contenido.pack(                                       VIEJA AREA DE CONTENIDO
             side="left",
             fill="both",
             expand=True,
             padx=30,
             pady=30
-        )
+        )"""
         
         self.vista_about = ctk.CTkFrame(
-            self.area_contenido,
+            self,
             fg_color="transparent"
         )
         
@@ -1561,7 +1643,7 @@ class MenuPrincipal(ctk.CTk):
         self.focus_force()
         
     def mostrar_about(self):
-        for widget in self.area_contenido.winfo_children():
+        for widget in self.vista_about.winfo_children():
             widget.pack_forget()
 
         # Mostrar Acerca de
