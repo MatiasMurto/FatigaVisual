@@ -1,0 +1,6 @@
+
+# Antiguas lineas de codigo que ya no usaremos en la version final
+
+
+
+-

@@ -611,7 +611,7 @@ class CalculadorEAR:
         return (v1 + v2) / (2.0 * h)
 
 # ==========================================
-# 2.5 PANTALLA DE CARGA (splash con ojo que parpadea)
+# 2.5 PANTALLA DE CARGA (splash con ojo que parpadeaba, ahora ya no jeje)
 # ==========================================
 class VentanaCarga(ctk.CTkToplevel):
     """Splash inicial: el ojo de Argos parpadea mientras se prepara el sistema.
@@ -622,9 +622,9 @@ class VentanaCarga(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.overrideredirect(True)
-        self.configure(fg_color="#050B12")
+        self.configure(fg_color="#000000")
 
-        w, h = 380, 340
+        w, h = 460, 420
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
@@ -633,8 +633,8 @@ class VentanaCarga(ctk.CTkToplevel):
         except Exception:
             pass
 
-        # Fondo del Splash
-        try:
+        # Fondo del Splash - YA NO SE UTILIZA 
+        """try:
             self.splash_bg = ctk.CTkImage(
                 Image.open(SPLASH_BG_PATH),
                 size=(w, h)
@@ -648,7 +648,7 @@ class VentanaCarga(ctk.CTkToplevel):
             image=self.splash_bg
         )
         self.lbl_fondo.place(x=0, y=0, relwidth=1, relheight=1)
-        self.lbl_fondo.lower()
+        self.lbl_fondo.lower()"""
 
   #===============================================================================================
   #===============================================================================================
@@ -668,7 +668,7 @@ class VentanaCarga(ctk.CTkToplevel):
         try:
             self.logo_splash = ctk.CTkImage(
                 Image.open(SPLASH_LOGO_PATH),
-                size=(150, 150)
+                size=(190,190)
         )
         except Exception:
             self.logo_splash = None
@@ -678,14 +678,14 @@ class VentanaCarga(ctk.CTkToplevel):
             text="",
             image=self.logo_splash
         )
-        self.lbl_ojo.pack(pady=(10,8))
+        self.lbl_ojo.pack(pady=(18,2))
         
   #===============================================================================================
   #===============================================================================================
 
         
         ctk.CTkLabel(self, text="A R G O S",
-                     font=ctk.CTkFont(family="Agency FB",size=38, weight="bold")).pack(pady=(0, 12))
+                     font=ctk.CTkFont(family="Agency FB",size=40, weight="bold")).pack(pady=(0, 8))
         
         ctk.CTkLabel(self, 
                     text="Monitor de Fatiga Visual",
@@ -695,14 +695,14 @@ class VentanaCarga(ctk.CTkToplevel):
                         size=20,
                         weight="normal"
                     )
-                ).pack(pady=(2, 18))
+                ).pack(pady=(2, 12))
         
 
         self.lbl_log = ctk.CTkLabel(self, text="Iniciando…", text_color="#8A93A8",
-                                    font=ctk.CTkFont(family="Consolas",
-                                                            size=14,
+                                    font=ctk.CTkFont(family="Agency FB",
+                                                            size=18,
                                                             weight="normal"))
-        self.lbl_log.pack()
+        self.lbl_log.pack(pady=(4, 0))
 
  
  #==================================================================
@@ -834,8 +834,8 @@ class VentanaLogin(ctk.CTkToplevel):
             self,
             text="A  R  G  O  S",
             font=ctk.CTkFont(
-                family=fuente_portada(46)[0],
-                size=46,
+                family="Agency FB",
+                size=42,
                 weight="bold"
             ),
             text_color="#E8EDF2"
@@ -862,8 +862,7 @@ class VentanaLogin(ctk.CTkToplevel):
                 self,
                 text="¿Quién está usando el sistema?",
                 font=ctk.CTkFont(
-                    family="Agency FB",
-                    size=20,
+                    size=17,
                     weight="bold"
                 )
             ).pack(pady=(8, 4))
@@ -878,8 +877,7 @@ class VentanaLogin(ctk.CTkToplevel):
             text=subtitulo,
             text_color="#8A93A8",
             font=ctk.CTkFont(
-                family="Consolas",
-                size=13
+                size=14
             )
         ).pack(pady=(0, 10))
 
@@ -888,8 +886,7 @@ class VentanaLogin(ctk.CTkToplevel):
             text="",
             text_color="#ff6060",
             font=ctk.CTkFont(
-                family="Agency FB",
-                size=15,
+                size=14,
                 weight="bold"
             )
         )
@@ -906,8 +903,7 @@ class VentanaLogin(ctk.CTkToplevel):
             fg_color="transparent",
             border_width=1,
             font=ctk.CTkFont(
-                family="Agency FB",
-                size=17
+                size=15
             ),
             command=self._cancelar
         ).pack(padx=18, pady=(0, 14), fill="x")
@@ -965,8 +961,7 @@ class VentanaLogin(ctk.CTkToplevel):
                 avatar,
                 text=iniciales,
                 font=ctk.CTkFont(
-                    family="Agency FB",
-                    size=20,
+                    size=18,
                     weight="bold"
                 )
             ).pack(expand=True)
@@ -976,8 +971,7 @@ class VentanaLogin(ctk.CTkToplevel):
                 card,   
                 text=nombre,
                 font=ctk.CTkFont(
-                    family="Agency FB",
-                    size=17,
+                    size=14,
                     weight="bold"
                 ),
                 wraplength=150
@@ -989,8 +983,7 @@ class VentanaLogin(ctk.CTkToplevel):
                 text=detalle,
                 text_color="#8A93A8",
                 font=ctk.CTkFont(
-                    family="Agency FB",
-                    size=16
+                    size=14
                 ),
                 wraplength=150,
                 justify="center"
@@ -1001,8 +994,7 @@ class VentanaLogin(ctk.CTkToplevel):
                 text="Entrar",
                 width=110,
                 font=ctk.CTkFont(
-                    family="Agency FB",
-                    size=17
+                    size=15
                 ),
                 command=lambda u=uid, n=nombre, r=rol, t=tipo, p=pin_hash:
                     self._entrar(u, n, r, t, p)
@@ -1026,8 +1018,7 @@ class VentanaLogin(ctk.CTkToplevel):
             text="Crear perfil",
             text_color="#8A93A8",
             font=ctk.CTkFont(
-                family="Agency FB",
-                size=15
+                size=14
             )
         ).pack(padx=10, pady=(0, 14))
         
@@ -1277,7 +1268,7 @@ class MenuPrincipal(ctk.CTk):
     BTN_Y0   = 0.285
     BTN_PASO = 0.068
 
-    # (clave, etiqueta, ¿solo administrador?)
+    # (clave, etiqueta, ¿solo administrador?) - Que lo que pones mati?
     SECCIONES = [
         ("control",     "M O N I T O R E O",         False),
         ("calib",       "C A L I B R A C I Ó N",     True),
@@ -1288,12 +1279,12 @@ class MenuPrincipal(ctk.CTk):
         ("about",       "A C E R C A   D E",         False),
     ]
     TITULOS = {
-        "control":     "MONITOREO",
-        "calib":       "CALIBRACIÓN",
-        "stats":       "ESTADÍSTICAS",
-        "stats_todos": "ESTAD. TOTALES",
-        "chart":       "GRÁFICA EAR",
-        "about":       "ACERCA DE",
+        "control":     "M O N I T O R E O",
+        "calib":       "C A L I B R A C I Ó N",
+        "stats":       "E S T A D Í S T I C A S",
+        "stats_todos": "E S T A D.  T O T A L E S",
+        "chart":       "G R Á F I C A  E A R",
+        "about":       "A C E R C A  D E",
     }
 
     def __init__(self, perfil_nombre, perfil_id, perfil_rol, bd):
@@ -1338,7 +1329,7 @@ class MenuPrincipal(ctk.CTk):
         v = self.vista_menu
 
         self.titulo_argos = ctk.CTkLabel(v, text="A  R  G  O  S",
-                                          font=fuente_portada(44),
+                                          font=("Agency FB",50),
                                           text_color=TemaArgos.TEXTO,
                                           fg_color="transparent")
         self.titulo_argos.place(relx=self.COL_X, rely=self.TITULO_Y, anchor="w")
@@ -1353,7 +1344,7 @@ class MenuPrincipal(ctk.CTk):
                 continue      # se oculta, en vez de ofrecer algo que no responde
             ctk.CTkButton(
                 v, text=etiqueta, width=self.BTN_W, anchor="w",
-                font=ctk.CTkFont(family=fuente_portada(15)[0], size=15),
+                font=ctk.CTkFont(family="Agency FB", size=18),
                 fg_color="transparent", hover_color=TemaArgos.PANEL_ALTO,
                 text_color=TemaArgos.TEXTO_SUAVE, corner_radius=TemaArgos.RADIO,
                 height=34,
@@ -1847,6 +1838,7 @@ class GestorAlertas:
         self._pospuesto_hasta = 0
         self.disparar(nivel, nivel, 84.0, 22.4, 7)
 
+#==========================================================================================
 
 class InterfazFatiga(ctk.CTkFrame):
     """Núcleo de monitoreo. Ya no es una ventana aparte: vive como panel dentro
@@ -3423,6 +3415,14 @@ if __name__ == "__main__":
         # --- 1. Obtener usuario de Windows y abrir BD ---
         usuario_windows = GestorAutenticacionWindows.usuario_actual()
         print(f"DEBUG: Usuario Windows detectado: {usuario_windows}")
+
+        # --- 1.5 Pantalla de carga (splash con el ojo de Argos) ---
+        print("DEBUG: Mostrando pantalla de carga...")
+        splash_root = ctk.CTk()
+        splash_root.withdraw()
+        carga = VentanaCarga(splash_root)
+        splash_root.wait_window(carga)
+        splash_root.destroy()
 
         bd = GestorBD()
         print(f"DEBUG: BD abierta. Windows Hello disponible: "
