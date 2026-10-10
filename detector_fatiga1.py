@@ -684,8 +684,8 @@ class VentanaCarga(ctk.CTkToplevel):
   #===============================================================================================
 
         
-        ctk.CTkLabel(self, text="A R G O S",
-                     font=ctk.CTkFont(family="Agency FB",size=40, weight="bold")).pack(pady=(0, 8))
+        ctk.CTkLabel(self, text="A  R  G  O  S",
+                     font=ctk.CTkFont(family="Agency FB",size=44, weight="normal")).pack(pady=(0, 8))
         
         ctk.CTkLabel(self, 
                     text="Monitor de Fatiga Visual",
@@ -756,16 +756,57 @@ class DialogoSecreto(ctk.CTkToplevel):
         self.valor = None
         self.protocol("WM_DELETE_WINDOW", self._cancelar)
 
-        ctk.CTkLabel(self, text=mensaje, wraplength=320).pack(pady=(20, 8))
-        self.entry = ctk.CTkEntry(self, show="•", width=240)
+        ctk.CTkLabel(
+            self,
+            text=mensaje,
+            wraplength=320,
+            text_color="#E8EDF2",
+            font=ctk.CTkFont(family="Segoe UI", size=14)
+        ).pack(pady=(20, 8))
+
+        self.entry = ctk.CTkEntry(
+            self,
+            show="•",
+            width=240,
+            fg_color="#0D151E",
+            border_color="#526474",
+            border_width=1,
+            text_color="#E8EDF2",
+            font=ctk.CTkFont(family="Agency FB", size=18)
+        )
         self.entry.pack(pady=4)
         self.entry.bind("<Return>", lambda e: self._aceptar())
 
         fr = ctk.CTkFrame(self, fg_color="transparent")
         fr.pack(pady=12)
-        ctk.CTkButton(fr, text="Aceptar", width=100, command=self._aceptar).pack(side="left", padx=6)
-        ctk.CTkButton(fr, text="Cancelar", width=100, fg_color="#555", hover_color="#666",
-                      command=self._cancelar).pack(side="left", padx=6)
+
+        boton_aceptar = ctk.CTkButton(
+            fr,
+            text="A C E P T A R",
+            width=100,
+            font=ctk.CTkFont(family="Agency FB", size=14),
+            fg_color="#E8EDF2",
+            hover_color="#E8EDF2",
+            text_color="#101820",
+            command=self._aceptar
+        )
+        boton_aceptar.pack(side="left", padx=6)
+
+        
+
+        boton_cancelar = ctk.CTkButton(
+            fr,
+            text="C A N C E L A R",
+            width=100,
+            font=ctk.CTkFont(family="Agency FB", size=14),
+            fg_color="#18232E",
+            hover_color="#354957",
+            text_color="#B7C5D2",
+            border_width=1,
+            border_color="#526474",
+            command=self._cancelar
+        )
+        boton_cancelar.pack(side="left", padx=6)
 
         self.lift()
         self.grab_set()
@@ -780,7 +821,6 @@ class DialogoSecreto(ctk.CTkToplevel):
         self.valor = None
         self.grab_release()
         self.destroy()
-
 # ==========================================
 # 3.1 VENTANA DE LOGIN (perfiles + Windows Hello)
 # ==========================================
@@ -835,8 +875,8 @@ class VentanaLogin(ctk.CTkToplevel):
             text="A  R  G  O  S",
             font=ctk.CTkFont(
                 family="Agency FB",
-                size=42,
-                weight="bold"
+                size=45,
+                weight="normal"
             ),
             text_color="#E8EDF2"
         )
@@ -862,15 +902,17 @@ class VentanaLogin(ctk.CTkToplevel):
                 self,
                 text="¿Quién está usando el sistema?",
                 font=ctk.CTkFont(
-                    size=17,
-                    weight="bold"
+                    family="Segoe UI",
+                    size=18,
+                    weight="normal"
                 )
             ).pack(pady=(8, 4))
         
         
         subtitulo = ("Cuenta de Windows protegida con Windows Hello"
                      if self.hello_disponible else
-                     "Sin Windows Hello: contraseña de Windows (local) o PIN de app")
+                     "-")
+                     #"Sin Windows Hello: contraseña de Windows (local) o PIN de app")
         
         ctk.CTkLabel(
             self,
@@ -899,11 +941,12 @@ class VentanaLogin(ctk.CTkToplevel):
 
         ctk.CTkButton(
             self,
-            text="Salir",
+            text="S A L I R",
             fg_color="transparent",
             border_width=1,
             font=ctk.CTkFont(
-                size=15
+                family= "Agency FB",
+                size=16
             ),
             command=self._cancelar
         ).pack(padx=18, pady=(0, 14), fill="x")
@@ -991,14 +1034,20 @@ class VentanaLogin(ctk.CTkToplevel):
             
             ctk.CTkButton(
                 card,
-                text="Entrar",
+                text="E N T R A R",
                 width=110,
                 font=ctk.CTkFont(
-                    size=15
+                    family="Agency FB",
+                    size=16
                 ),
+                fg_color="#E8EDF2",
+                hover_color="#E8EDF2",
+                text_color="#101820",
                 command=lambda u=uid, n=nombre, r=rol, t=tipo, p=pin_hash:
                     self._entrar(u, n, r, t, p)
             ).pack(pady=(0, 14))
+
+
 
         # Tarjeta "+ Crear perfil" al final de la grilla
         idx_add = len(perfiles)
@@ -1067,7 +1116,7 @@ class VentanaLogin(ctk.CTkToplevel):
             else:
                 if pin_hash:
                     pin = self._pedir_secreto("PIN de la aplicación",
-                                              f"PIN de la aplicación de {nombre}:")
+                                              f"Intruduzca su PIN para continuar")
                     if pin is None:
                         return
                     if not self.bd.verificar_pin_perfil(uid, pin):
@@ -1078,6 +1127,8 @@ class VentanaLogin(ctk.CTkToplevel):
                     pin = self._pedir_secreto("Crear PIN",
                                               "Sin Windows Hello disponible: creá un PIN "
                                               "para proteger esta cuenta (primera vez).")
+                    
+                    
                     if not pin:
                         self.label_error.configure(text="Se necesita un PIN para continuar.")
                         return
@@ -1311,13 +1362,41 @@ class MenuPrincipal(ctk.CTk):
                               method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
         self.imagen_fondo = ctk.CTkImage(light_image=imagen, dark_image=imagen,
                                           size=(ancho, alto))
-        self.fondo_menu = ctk.CTkLabel(self, text="", image=self.imagen_fondo,
-                                        fg_color="transparent")
-        self.fondo_menu.place(relx=0, rely=0, relwidth=1, relheight=1)
+        
+        
+        
+        # La vista del menú ocupa toda la ventana
+        self.vista_menu = ctk.CTkFrame(
+            self,
+            fg_color="transparent",
+            corner_radius=0
+        )
+        self.vista_menu.place(
+            relx=0, rely=0,
+            relwidth=1, relheight=1
+        )
 
-        # Las dos caras de la carcasa, superpuestas: se muestra una por vez.
-        self.vista_menu    = ctk.CTkFrame(self, fg_color="transparent")
-        self.vista_seccion = ctk.CTkFrame(self, fg_color=TemaArgos.FONDO)
+        # LA IMAGEN ES EL FONDO INTERNO DEL MENÚ
+        self.fondo_menu = ctk.CTkLabel(
+            self.vista_menu,
+            text="",
+            image=self.imagen_fondo,
+            fg_color="transparent",
+            corner_radius=0
+        )
+        self.fondo_menu.place(
+            x=0, y=0,
+            relwidth=1, relheight=1
+        )
+
+        # Fondo de las secciones, independiente del menú
+        self.vista_seccion = ctk.CTkFrame(
+            self,
+            fg_color=TemaArgos.FONDO
+        )
+        
+    #============================================================================
+       
 
         self._construir_menu()
         self._construir_marco_seccion()
@@ -1370,14 +1449,23 @@ class MenuPrincipal(ctk.CTk):
         sesion.place(relx=0.965, rely=0.955, anchor="se")
         caja = ctk.CTkFrame(sesion, fg_color="transparent")
         caja.pack(side="left", padx=(0, 14))
+        
         ctk.CTkLabel(caja, text=self.perfil_nombre, font=TemaArgos.ui(14, "bold"),
                      text_color=TemaArgos.TEXTO, anchor="e").pack(anchor="e")
+        
         ctk.CTkLabel(caja, text=self.perfil_rol.upper(), font=TemaArgos.dato(10),
                      text_color=TemaArgos.TEXTO_TENUE, anchor="e").pack(anchor="e")
-        ctk.CTkButton(sesion, text="S A L I R", width=88, height=30,
-                      font=TemaArgos.dato(11), fg_color="transparent",
-                      hover_color=TemaArgos.RIESGO, text_color=TemaArgos.TEXTO_TENUE,
-                      border_width=1, border_color=TemaArgos.LINEA,
+        
+        ctk.CTkButton(
+                      sesion,   
+                      text="S A L I R", 
+                      width=88, height=30,
+                      font=ctk.CTkFont(family="Agency FB", size=18), 
+                      fg_color="transparent",
+                      hover_color=TemaArgos.RIESGO, 
+                      text_color=TemaArgos.TEXTO_SUAVE,
+                      border_width=1,
+                      border_color=TemaArgos.LINEA,
                       corner_radius=TemaArgos.RADIO,
                       command=self._cerrar_sesion).pack(side="left")
 
