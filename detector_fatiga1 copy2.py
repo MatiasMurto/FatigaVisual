@@ -668,7 +668,7 @@ class VentanaCarga(ctk.CTkToplevel):
         try:
             self.logo_splash = ctk.CTkImage(
                 Image.open(SPLASH_LOGO_PATH),
-                size=(190,190)
+                size=(230,230)
         )
         except Exception:
             self.logo_splash = None
