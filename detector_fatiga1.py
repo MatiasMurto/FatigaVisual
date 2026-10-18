@@ -5,14 +5,19 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 import math
+import numpy as np
 import statistics
 import hashlib
 import asyncio
 import threading
+import queue
+import socket
+import re
 import sqlite3
 from datetime import datetime
 import urllib.request
 import os
+import pathlib
 import sys
 import ctypes
 import winsound
@@ -26,10 +31,12 @@ from PIL import Image
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import base64
 import win32api
+import win32gui
+import win32con
 import win32net
 import win32security
 import winreg
-from PIL import Image, ImageTk, ImageOps, ImageSequence
+from PIL import Image, ImageTk, ImageOps, ImageSequence, ImageDraw, ImageFilter
 import random
 import os
 from datetime import datetime
@@ -1803,6 +1810,354 @@ DEFAULTS = {
 #===============================================
 #=================================================
 
+class IconoBandeja:
+    """Dueño exclusivo de HWND/HICON/menús en un hilo Win32, sin referencias a Tk."""
+    MENSAJE = win32con.WM_USER + 20
+    ACTUALIZAR = win32con.WM_USER + 21
+    TIMER_CLIC = 1
+
+    def __init__(self, comandos):
+        self._comandos = comandos
+        self._lock = threading.Lock()
+        self._estado = {}
+        self._tooltip = "Argos · Detección detenida"
+        self._activo = False
+        self._hwnd = None
+        self._icono = None
+        self._cerrando = threading.Event()
+        self._nombre = f"ArgosBandeja{id(self)}"
+        self._ignorar_up = False
+        self._timer = 0
+        self._hilo = threading.Thread(target=self._ejecutar, name=self._nombre, daemon=True)
+        self._hilo.start()
+
+    @property
+    def activo(self):
+        with self._lock:
+            return self._activo
+
+    def actualizar(self, estado, tooltip):
+        with self._lock:
+            self._estado = dict(estado)
+            self._tooltip = tooltip[:127]
+            hwnd = self._hwnd
+        if hwnd and not self._cerrando.is_set():
+            try:
+                win32gui.PostMessage(hwnd, self.ACTUALIZAR, 0, 0)
+            except win32gui.error:
+                pass
+
+    def _notificar_icono(self, operacion):
+        with self._lock:
+            texto = self._tooltip
+        datos = (self._hwnd, 1, win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP,
+                 self.MENSAJE, self._icono, texto)
+        win32gui.Shell_NotifyIcon(operacion, datos)
+        with self._lock:
+            self._activo = True
+
+    def _ejecutar(self):
+        instancia = win32api.GetModuleHandle(None)
+        registrada = False
+        try:
+            # SetTimer no está expuesto en todas las versiones de pywin32.
+            # UINT_PTR/HWND deben conservar los 64 bits en Python para Windows.
+            from ctypes import wintypes
+            self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+            self._user32.SetTimer.argtypes = (wintypes.HWND, ctypes.c_size_t,
+                                               wintypes.UINT, ctypes.c_void_p)
+            self._user32.SetTimer.restype = ctypes.c_size_t
+            self._user32.KillTimer.argtypes = (wintypes.HWND, ctypes.c_size_t)
+            self._user32.KillTimer.restype = wintypes.BOOL
+            self._taskbar_created = win32gui.RegisterWindowMessage("TaskbarCreated")
+            clase = win32gui.WNDCLASS()
+            clase.hInstance = instancia
+            clase.lpszClassName = self._nombre
+            clase.style = win32con.CS_DBLCLKS
+            clase.lpfnWndProc = self._wndproc
+            win32gui.RegisterClass(clase)
+            registrada = True
+            hwnd = win32gui.CreateWindow(self._nombre, "Argos Bandeja", 0,
+                                         0, 0, 0, 0, 0, 0, instancia, None)
+            with self._lock:
+                self._hwnd = hwnd
+            self._icono = win32gui.LoadImage(0, ICON_PATH, win32con.IMAGE_ICON, 0, 0,
+                                            win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
+            if not self._icono:
+                raise OSError("No se pudo cargar el ícono de Argos")
+            if self._cerrando.is_set():
+                return
+            self._notificar_icono(win32gui.NIM_ADD)
+            # Cubre cerrar() mientras se estaba cargando el ícono.
+            if self._cerrando.is_set():
+                return
+            win32gui.PumpMessages()
+        except Exception as exc:
+            print(f"DEBUG bandeja Argos: {exc}")
+        finally:
+            with self._lock:
+                self._activo = False
+            try:
+                if self._hwnd and win32gui.IsWindow(self._hwnd):
+                    win32gui.DestroyWindow(self._hwnd)
+            except win32gui.error:
+                pass
+            with self._lock:
+                self._hwnd = None
+            if self._icono:
+                try:
+                    win32gui.DestroyIcon(self._icono)
+                except win32gui.error:
+                    pass
+                self._icono = None
+            if registrada:
+                try:
+                    win32gui.UnregisterClass(self._nombre, instancia)
+                except win32gui.error:
+                    pass
+            if not self._cerrando.is_set():
+                self._comandos.put("bandeja_error")
+
+    def _cancelar_clic(self, hwnd):
+        if self._timer:
+            self._user32.KillTimer(hwnd, self._timer)
+            self._timer = 0
+
+    def _wndproc(self, hwnd, mensaje, wparam, lparam):
+        try:
+            if mensaje == self._taskbar_created:
+                if self._icono and not self._cerrando.is_set():
+                    self._notificar_icono(win32gui.NIM_ADD)
+                return 0
+            if mensaje == self.ACTUALIZAR:
+                if self._icono and not self._cerrando.is_set():
+                    self._notificar_icono(win32gui.NIM_MODIFY)
+                return 0
+            if mensaje == self.MENSAJE:
+                evento = lparam & 0xFFFF
+                if evento == win32con.WM_LBUTTONDBLCLK:
+                    self._cancelar_clic(hwnd)
+                    self._ignorar_up = True  # Segundo UP del doble clic.
+                    self._comandos.put("panel")
+                elif evento == win32con.WM_LBUTTONUP:
+                    if self._ignorar_up:
+                        self._ignorar_up = False
+                    else:
+                        self._cancelar_clic(hwnd)
+                        self._timer = self._user32.SetTimer(
+                            hwnd, self.TIMER_CLIC, self._user32.GetDoubleClickTime(), None)
+                        if not self._timer:
+                            self._comandos.put("abrir")
+                elif evento in (win32con.WM_RBUTTONUP, win32con.WM_CONTEXTMENU):
+                    self._cancelar_clic(hwnd)
+                    self._menu(hwnd)
+                return 0
+            if mensaje == win32con.WM_TIMER and self._timer and wparam == self._timer:
+                self._cancelar_clic(hwnd)
+                self._comandos.put("abrir")
+                return 0
+            if mensaje == win32con.WM_CLOSE:
+                win32gui.DestroyWindow(hwnd)
+                return 0
+            if mensaje == win32con.WM_DESTROY:
+                self._cancelar_clic(hwnd)
+                try:
+                    win32gui.Shell_NotifyIcon(win32gui.NIM_DELETE, (hwnd, 1))
+                finally:
+                    with self._lock:
+                        self._activo = False
+                    win32gui.PostQuitMessage(0)
+                return 0
+        except Exception as exc:
+            print(f"DEBUG bandeja mensaje: {exc}")
+            if mensaje in (self.ACTUALIZAR, self._taskbar_created):
+                with self._lock:
+                    self._activo = False
+                self._comandos.put("bandeja_error")
+        return win32gui.DefWindowProc(hwnd, mensaje, wparam, lparam)
+
+    def _menu(self, hwnd):
+        with self._lock:
+            estado = dict(self._estado)
+        menu = win32gui.CreatePopupMenu()
+        comandos = {1: "abrir", 3: estado.get("accion_deteccion", "iniciar"),
+                    4: "recomendacion", 5: "reactivar" if estado.get("silenciado") else "silenciar",
+                    7: "salir"}
+        try:
+            win32gui.AppendMenu(menu, win32con.MF_STRING, 1, "Abrir Argos")
+            win32gui.SetMenuDefaultItem(menu, 1, False)
+            win32gui.AppendMenu(menu, win32con.MF_STRING | win32con.MF_GRAYED, 2,
+                                estado.get("estado_menu", "Detección detenida"))
+            win32gui.AppendMenu(menu, win32con.MF_STRING, 3,
+                                estado.get("texto_deteccion", "Iniciar detección"))
+            disponible = estado.get("recomendacion", False)
+            win32gui.AppendMenu(menu, win32con.MF_STRING | (0 if disponible else win32con.MF_GRAYED),
+                                4, "Ver recomendación" if disponible else "Ver recomendación (sin fatiga)")
+            win32gui.AppendMenu(menu, win32con.MF_STRING, 5,
+                                "Reactivar alertas" if estado.get("silenciado") else "Silenciar alertas 30 min")
+            win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+            win32gui.AppendMenu(menu, win32con.MF_STRING, 7, "Salir de Argos")
+            win32gui.SetForegroundWindow(hwnd)
+            x, y = win32gui.GetCursorPos()
+            elegido = win32gui.TrackPopupMenu(menu, win32con.TPM_RIGHTBUTTON | win32con.TPM_RETURNCMD,
+                                              x, y, 0, hwnd, None)
+            if elegido in comandos:
+                self._comandos.put(comandos[elegido])
+        finally:
+            if win32gui.IsWindow(hwnd):
+                win32gui.PostMessage(hwnd, win32con.WM_NULL, 0, 0)
+            win32gui.DestroyMenu(menu)
+
+    def cerrar(self):
+        self._cerrando.set()
+        with self._lock:
+            hwnd = self._hwnd
+        if hwnd:
+            try:
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            except win32gui.error:
+                pass
+        if threading.current_thread() is not self._hilo:
+            self._hilo.join(timeout=0.4)
+
+
+class PanelRapido(ctk.CTkToplevel):
+    """Tarjeta de estado: el dueño Tk aporta los datos una vez por segundo."""
+    ANCHO, ALTO = 340, 340
+
+    def __init__(self, parent, estado):
+        super().__init__(parent)
+        self._raiz = parent
+        self._animacion_after = self._foco_after = None
+        self._cerrado = False
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.attributes("-alpha", 0.0)
+        self.configure(fg_color=TemaArgos.PANEL)
+        esc = self._get_window_scaling()
+        izq, arriba, der, abajo = ToastArgos._area_trabajo(self)
+        self._x = max(izq, der - round((self.ANCHO + 12)*esc))
+        self._y = max(arriba, abajo - round((self.ALTO + 12)*esc))
+        self._desliz = round(16*esc)
+        self.geometry(f"{self.ANCHO}x{self.ALTO}{self._x:+d}{self._y+self._desliz:+d}")
+        tarjeta = ctk.CTkFrame(self, fg_color=TemaArgos.PANEL, border_color=TemaArgos.LINEA,
+                               border_width=1, corner_radius=TemaArgos.RADIO_CARD)
+        tarjeta.pack(fill="both", expand=True)
+        cabecera = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        cabecera.pack(fill="x", padx=14, pady=(12, 0))
+        self._logo = cargar_logo((25, 25))
+        if self._logo:
+            ctk.CTkLabel(cabecera, text="", image=self._logo, width=26).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(cabecera, text="A R G O S", font=fuente_portada(17),
+                     text_color=TemaArgos.TEXTO).pack(side="left")
+        self._estado = ctk.CTkLabel(tarjeta, text="", font=TemaArgos.ui(12))
+        self._estado.pack(fill="x", padx=14)
+        indice = ctk.CTkFrame(tarjeta, fg_color=TemaArgos.PANEL_ALTO,
+                              border_width=1, border_color=TemaArgos.LINEA,
+                              corner_radius=TemaArgos.RADIO_CARD)
+        indice.pack(fill="x", padx=14, pady=(4, 6))
+        ctk.CTkLabel(indice, text="ÍNDICE DE FATIGA", font=TemaArgos.ui(10),
+                     text_color=TemaArgos.TEXTO_TENUE, height=18).pack(pady=(4, 0))
+        self._valor = ctk.CTkLabel(indice, text="—", font=TemaArgos.dato(30, "bold"), height=34)
+        self._valor.pack()
+        self._nivel = ctk.CTkLabel(indice, text="", font=TemaArgos.ui(11), height=18)
+        self._nivel.pack()
+        self._barra = ctk.CTkProgressBar(indice, height=5, fg_color=TemaArgos.LINEA)
+        self._barra.pack(fill="x", padx=10, pady=(4, 8))
+        metricas = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        metricas.pack(fill="x", padx=10)
+        self._metricas = []
+        for i, titulo in enumerate(("Parpadeos/min", "PERCLOS %", "Parpadeos\nde la sesión")):
+            metricas.grid_columnconfigure(i, weight=1, uniform="metrica")
+            valor = ctk.CTkLabel(metricas, text="—", font=TemaArgos.dato(16), height=22)
+            valor.grid(row=0, column=i, sticky="ew")
+            ctk.CTkLabel(metricas, text=titulo, font=TemaArgos.ui(10), height=26,
+                         text_color=TemaArgos.TEXTO_TENUE).grid(row=1, column=i, sticky="n")
+            self._metricas.append(valor)
+        self._silencio = ctk.CTkLabel(tarjeta, text="", font=TemaArgos.ui(10), height=18,
+                                      text_color=TemaArgos.TEXTO_TENUE)
+        self._silencio.pack(fill="x", padx=10)
+        botones = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        botones.pack(fill="x", padx=14, pady=(2, 10))
+        ctk.CTkButton(botones, text="Abrir Argos", height=27, fg_color=TemaArgos.ACENTO,
+                      hover_color=TemaArgos.ACENTO_VIVO,
+                      command=lambda: self._accion("abrir")).pack(fill="x", pady=(0, 4))
+        fila = ctk.CTkFrame(botones, fg_color="transparent")
+        fila.pack(fill="x")
+        fila.grid_columnconfigure((0, 1), weight=1, uniform="boton")
+        self._deteccion = ctk.CTkButton(fila, text="", width=0, height=28,
+                                         font=TemaArgos.ui(10), fg_color=TemaArgos.PANEL_ALTO,
+                                         command=lambda: self._accion(self._comando_deteccion))
+        self._deteccion.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self._recomendacion = ctk.CTkButton(fila, text="Ver recomendación", width=0, height=28,
+                                            font=TemaArgos.ui(10), fg_color=TemaArgos.PANEL_ALTO,
+                                            command=lambda: self._accion("recomendacion"))
+        self._recomendacion.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self.actualizar(estado)
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<FocusOut>", self._perder_foco, add="+")
+        self._inicio = time.monotonic()
+        self.lift()
+        self.focus_force()
+        self._animar()
+
+    def actualizar(self, estado):
+        activo, datos = estado["activo"], estado["datos"]
+        color = GestorAlertas.COLORES.get(estado["nivel"], TemaArgos.OK)
+        self._estado.configure(text="● Detección activa" if activo else "○ Detección detenida",
+                               text_color=TemaArgos.OK if activo else TemaArgos.TEXTO_TENUE)
+        self._valor.configure(text=f'{estado["score"]:.0f}' if datos else "—", text_color=color)
+        self._nivel.configure(text=estado["nivel"] if datos else "Sin datos de esta sesión", text_color=color)
+        self._barra.configure(progress_color=color)
+        self._barra.set(estado["score"]/100 if datos else 0)
+        for etiqueta, valor in zip(self._metricas, (str(estado["bpm"]), f'{estado["perclos"]:.1f}', str(estado["total"]))):
+            etiqueta.configure(text=valor if datos else "—")
+        self._silencio.configure(text=f'Alertas silenciadas hasta {estado["hasta"]}' if estado["silenciado"] else "")
+        self._comando_deteccion = estado["accion_deteccion"]
+        self._deteccion.configure(text=estado["texto_deteccion"])
+        self._recomendacion.configure(state="normal" if estado["recomendacion"] else "disabled")
+
+    def _accion(self, comando):
+        raiz = self._raiz
+        self.destroy()
+        raiz._ejecutar_comando_bandeja(comando)
+
+    def _animar(self):
+        self._animacion_after = None
+        fraccion = min(1, (time.monotonic()-self._inicio)/0.18)
+        avance = 1-(1-fraccion)**3
+        self.attributes("-alpha", avance)
+        y = self._y + round(self._desliz*(1-avance))
+        self.geometry(f"{self.ANCHO}x{self.ALTO}{self._x:+d}{y:+d}")
+        if fraccion < 1:
+            self._animacion_after = self.after(16, self._animar)
+
+    def _perder_foco(self, event=None):
+        if self._foco_after is not None:
+            self.after_cancel(self._foco_after)
+        self._foco_after = self.after(120, self._comprobar_foco)
+
+    def _comprobar_foco(self):
+        self._foco_after = None
+        foco = self.focus_get()
+        if foco is None or foco.winfo_toplevel() is not self:
+            # Un doble clic en la bandeja quita primero el foco. Conservar
+            # esa intención hasta que llegue "panel" por la cola de 200 ms.
+            self._raiz._panel_cierre_foco = time.monotonic()
+            self.destroy()
+
+    def destroy(self):
+        if self._cerrado:
+            return
+        self._cerrado = True
+        for pendiente in (self._animacion_after, self._foco_after):
+            if pendiente is not None:
+                self.after_cancel(pendiente)
+        if getattr(self._raiz, "_panel_rapido", None) is self:
+            self._raiz._panel_rapido = None
+        super().destroy()
+
+
 class MenuPrincipal(ctk.CTk):
     """Carcasa de la aplicación. El fondo, el título y el menú son permanentes;
     cada sección se abre en su lugar, a ancho completo y sin el menú."""
@@ -1846,6 +2201,19 @@ class MenuPrincipal(ctk.CTk):
         self.bd            = bd
         self.cerrar_sesion_solicitado = False
         self.monitoreo     = None      # InterfazFatiga, creada una sola vez
+        self._recomendaciones_after = self.after(200, self._consultar_recomendaciones)
+        self._recordatorio_recomendacion = None
+        self._destruyendo = False
+        self._comandos_bandeja = queue.Queue()
+        self._bandeja = IconoBandeja(self._comandos_bandeja)
+        self._panel_rapido = None
+        self._panel_cierre_foco = 0.0
+        self._aviso_bandeja_mostrado = False
+        self._silencio_bandeja_hasta = 0.0
+        self._ultimo_estado_bandeja = 0.0
+        self._frente_after = None
+        self.bind("<Unmap>", self._minimizar_bandeja, add="+")
+        self.protocol("WM_DELETE_WINDOW", self._ocultar_o_cerrar)
 
         self.title("ARGOS")
         aplicar_icono(self)
@@ -2184,7 +2552,161 @@ class MenuPrincipal(ctk.CTk):
             self.lienzo.itemconfigure(self._ojo_id, image=self._ojos_tk[nivel])
         self._programar_animacion("ojo", demora)
 
+    def _consultar_recomendaciones(self):
+        self._recomendaciones_after = None
+        # Un lote se reduce al último nivel recibido, sin reconstruir varias
+        # veces la ventana ni monopolizar el hilo de la interfaz.
+        clave = None
+        for _ in range(32):
+            try:
+                clave = COLA_RECOMENDACIONES.get_nowait()
+            except queue.Empty:
+                break
+        if clave is not None:
+            VentanaRecomendacion.abrir(self, clave)
+        for _ in range(32):
+            try:
+                comando = self._comandos_bandeja.get_nowait()
+            except queue.Empty:
+                break
+            self._ejecutar_comando_bandeja(comando)
+            if self._destruyendo:
+                return
+        if time.monotonic() - self._ultimo_estado_bandeja >= 1:
+            self._actualizar_bandeja()
+        self._recomendaciones_after = self.after(200, self._consultar_recomendaciones)
+
+    def _estado_bandeja(self):
+        ahora = time.time()
+        mon = self.monitoreo
+        activo = bool(mon and mon.sistema_activo)
+        datos = bool(mon and mon.deteccion_inicio is not None)
+        if mon and self._silencio_bandeja_hasta:
+            mon.alertas._pospuesto_hasta = max(mon.alertas._pospuesto_hasta, self._silencio_bandeja_hasta)
+            self._silencio_bandeja_hasta = 0.0
+        hasta = mon.alertas._pospuesto_hasta if mon else self._silencio_bandeja_hasta
+        score, nivel = mon._calcular_indice_fatiga() if datos else (0.0, "Normal")
+        accion = "pausar" if activo else "reanudar" if datos else "iniciar"
+        texto = {"pausar": "Pausar detección", "reanudar": "Reanudar detección", "iniciar": "Iniciar detección"}[accion]
+        estado = dict(activo=activo, datos=datos, score=score, nivel=nivel,
+                      bpm=sum(1 for t in mon.historial_tiempos if 0 <= ahora-t <= 60) if datos else 0,
+                      perclos=mon.perclos_actual if datos else 0.0,
+                      total=mon.total_parpadeos if datos else 0,
+                      silenciado=hasta > ahora,
+                      hasta=datetime.fromtimestamp(hasta).strftime("%H:%M") if hasta > ahora else "",
+                      accion_deteccion=accion, texto_deteccion=texto,
+                      recomendacion=datos and nivel in ("Leve", "Moderada", "Severa"),
+                      estado_menu=f"Detección activa · índice {score:.0f} ({nivel})" if activo else "Detección detenida")
+        if estado["silenciado"]:
+            tooltip = f'Argos · Alertas silenciadas hasta {estado["hasta"]}'
+        elif activo:
+            tooltip = "Argos · Detección activa · " + (f"Fatiga {nivel.lower()}" if nivel != "Normal" else "Normal")
+        else:
+            tooltip = "Argos · Detección detenida"
+        estado["tooltip"] = tooltip
+        return estado
+
+    def _actualizar_bandeja(self):
+        estado = self._estado_bandeja()
+        self._ultimo_estado_bandeja = time.monotonic()
+        self._bandeja.actualizar(estado, estado["tooltip"])
+        if self._panel_rapido is not None:
+            self._panel_rapido.actualizar(estado)
+
+    def _minimizar_bandeja(self, event):
+        if event.widget is self and not self._destruyendo and self.state() == "iconic":
+            if self._bandeja.activo:
+                self._ocultar_en_bandeja()
+
+    def _ocultar_o_cerrar(self):
+        if self._bandeja.activo:
+            self._ocultar_en_bandeja()
+        else:
+            self.on_closing()
+
+    def _ocultar_en_bandeja(self):
+        if not self._bandeja.activo:
+            return
+        if self._panel_rapido is not None:
+            self._panel_rapido.destroy()
+        self.withdraw()
+        if not self._aviso_bandeja_mostrado:
+            self._aviso_bandeja_mostrado = True
+            threading.Thread(target=GestorAlertas._toast_windows,
+                             args=("Argos en la bandeja del sistema",
+                                   "Argos sigue activo en la bandeja del sistema. Doble clic en el ícono para ver su estado; clic derecho para más opciones."),
+                             kwargs={"recomendacion": False, "tag": "argos-bandeja"},
+                             daemon=True).start()
+
+    def _abrir_desde_bandeja(self):
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus_force()
+        if self._frente_after is not None:
+            self.after_cancel(self._frente_after)
+        self._frente_after = self.after(400, self._quitar_topmost_bandeja)
+
+    def _quitar_topmost_bandeja(self):
+        self._frente_after = None
+        self.attributes("-topmost", False)
+
+    def _ejecutar_comando_bandeja(self, comando):
+        if self._destruyendo:
+            return
+        if comando == "panel":
+            if self._panel_rapido is not None:
+                self._panel_rapido.destroy()
+            else:
+                margen = ctypes.windll.user32.GetDoubleClickTime()/1000 + 0.25
+                if time.monotonic() - self._panel_cierre_foco > margen:
+                    self._panel_rapido = PanelRapido(self, self._estado_bandeja())
+                self._panel_cierre_foco = 0.0
+            return
+        if self._panel_rapido is not None:
+            self._panel_rapido.destroy()
+        if comando == "salir":
+            self.on_closing()
+            return
+        if comando == "abrir":
+            self._abrir_desde_bandeja()
+        elif comando == "bandeja_error":
+            # No dejar una ventana oculta si falla el ícono o muere su hilo.
+            if self.state() in ("withdrawn", "iconic"):
+                self._abrir_desde_bandeja()
+        elif comando in ("iniciar", "reanudar"):
+            if comando == "iniciar":
+                self._abrir_desde_bandeja()
+            self.abrir_seccion("control")
+            self._estado_bandeja()  # Aplicar silencio pendiente antes de iniciar.
+            if not self.monitoreo.sistema_activo:
+                self.monitoreo.toggle_sistema()
+        elif comando == "pausar":
+            if self.monitoreo is not None and self.monitoreo.sistema_activo:
+                self.monitoreo.toggle_sistema()
+        elif comando == "recomendacion":
+            estado = self._estado_bandeja()
+            if estado["recomendacion"]:
+                VentanaRecomendacion.abrir(self, estado["nivel"])
+        elif comando in ("silenciar", "reactivar"):
+            hasta = time.time()+1800 if comando == "silenciar" else 0.0
+            self._silencio_bandeja_hasta = hasta if self.monitoreo is None else 0.0
+            if self.monitoreo is not None:
+                self.monitoreo.alertas._pospuesto_hasta = hasta
+        self._actualizar_bandeja()
+
     def destroy(self):
+        self._destruyendo = True
+        if getattr(self, "_panel_rapido", None) is not None:
+            self._panel_rapido.destroy()
+        if hasattr(self, "_bandeja"):
+            self._bandeja.cerrar()
+        for nombre in ("_recomendaciones_after", "_recordatorio_recomendacion", "_frente_after"):
+            pendiente = getattr(self, nombre, None)
+            if pendiente is not None:
+                self.after_cancel(pendiente)
+                setattr(self, nombre, None)
         self._animaciones_destruidas = True
         if hasattr(self, "_animaciones"):
             self._pausar_animaciones()
@@ -2350,59 +2872,969 @@ class MenuPrincipal(ctk.CTk):
 # ==========================================
 # 4.5 ALERTAS ESCALONADAS (4 canales)
 # ==========================================
+# Ojos del personaje de assets/recomendaciones/leve_original.png (1254 px),
+# medidos a mano: (cx, cy, semieje_x, semieje_y, pestañas_arriba).
+OJOS_RECO_LEVE = [(446, 504, 58, 42, 9), (624, 501, 39, 41, 8)]
+
+
+def parpadeo_parametrico(img, ojos, k, ss=4):
+    """Devuelve 'img' con los ojos a k de cerrarse (0 abierto, 1 cerrado).
+
+    Para personajes sin versión de ojos cerrados: cada ojo es una elipse; el
+    párpado baja como una cortina con el color de piel de cada columna (tomado
+    justo encima del ojo y suavizado) y deja una línea de pestañas suave.
+    Se dibuja a 'ss'× y se reduce, para bordes sin dientes."""
+    if k <= 0.01:
+        return img.copy()
+    # Solo se procesa el recorte de los ojos (el supersampleado de la imagen
+    # entera costaba ~130 ms por cuadro); después se pega en su lugar.
+    margen = 16
+    x0 = max(0, int(min(cx - ea for cx, _, ea, _, _ in ojos)) - margen)
+    x1 = min(img.width, int(max(cx + ea for cx, _, ea, _, _ in ojos)) + margen)
+    y0 = max(0, int(min(cy - eb - ex for _, cy, _, eb, ex in ojos)) - margen)
+    y1 = min(img.height, int(max(cy + eb for _, cy, _, eb, _ in ojos)) + margen)
+    if (x0, y0, x1, y1) != (0, 0, img.width, img.height):
+        recorte = parpadeo_parametrico(
+            img.crop((x0, y0, x1, y1)),
+            [(cx - x0, cy - y0, ea, eb, ex) for cx, cy, ea, eb, ex in ojos], k, ss)
+        salida = img.copy()
+        salida.paste(recorte, (x0, y0))
+        return salida
+    a = np.array(img.convert("RGBA"))
+    W, H = img.size
+    mascara = Image.new("L", (W * ss, H * ss), 0)
+    lineas = Image.new("RGBA", (W * ss, H * ss), (0, 0, 0, 0))
+    dm, dl = ImageDraw.Draw(mascara), ImageDraw.Draw(lineas)
+    relleno = a.copy()
+    for cx, cy, ea, eb, extra in ojos:
+        xs = np.linspace(cx - ea, cx + ea, 120)
+        curva = np.sqrt(np.clip(1 - ((xs - cx) / ea) ** 2, 0, 1))
+        semi = eb * curva
+        arriba = cy - semi - extra * curva - 2
+        abajo = cy + semi
+        cierre = cy + 0.40 * semi                 # línea final: arco suave
+        borde = arriba + k * (cierre - arriba)
+        # al final del cierre también se tapa la parte baja del ojo
+        hasta = borde + max(0.0, (k - 0.55) / 0.45) * (abajo + 3 - borde)
+        dm.polygon([(x * ss, y * ss) for x, y in zip(xs, arriba)] +
+                   [(x * ss, y * ss) for x, y in zip(xs[::-1], hasta[::-1])], fill=255)
+        cols = list(range(int(cx - ea) - 2, int(cx + ea) + 3))
+        muestras = []
+        for x in cols:
+            uu = min(1.0, max(-1.0, (x - cx) / ea))
+            ytop = int(cy - eb * math.sqrt(1 - uu ** 2) - extra - 8)
+            muestras.append(a[max(0, ytop - 4):ytop + 1, x, :3].mean(axis=0))
+        muestras = np.array(muestras)
+        nucleo = np.ones(9) / 9
+        muestras = np.stack([np.convolve(np.pad(muestras[:, c], 4, mode="edge"), nucleo, "valid")
+                             for c in range(3)], axis=1)
+        for x, m in zip(cols, muestras):
+            relleno[int(cy - eb - extra - 6):int(cy + eb + 6), x, :3] = m
+        for i in range(len(xs) - 1):
+            rel = i / (len(xs) - 1)
+            grosor = (1.5 + 3.5 * math.sin(math.pi * rel) * min(1, k * 1.6)) * ss
+            dl.line([(xs[i] * ss, borde[i] * ss), (xs[i + 1] * ss, borde[i + 1] * ss)],
+                    fill=(38, 38, 40, 255), width=max(1, int(round(grosor))))
+    mascara = mascara.resize((W, H), Image.Resampling.LANCZOS)
+    lineas = lineas.resize((W, H), Image.Resampling.LANCZOS)
+    salida = img.copy()
+    salida.paste(Image.fromarray(relleno), (0, 0), mascara)
+    salida.alpha_composite(lineas)
+    return salida
+
+
+PUERTO_RECOMENDACIONES = 47613
+CLAVES_RECOMENDACION = frozenset(("Leve", "Moderada", "Severa", "BajaFrecuencia"))
+COLA_RECOMENDACIONES = queue.Queue(maxsize=32)
+
+
+def registrar_protocolo_argos():
+    """Registro por usuario, idempotente; no requiere privilegios de administrador."""
+    try:
+        if getattr(sys, "frozen", False):
+            comando = f'"{sys.executable}" "%1"'
+        else:
+            ejecutable = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            comando = f'"{ejecutable}" "{os.path.abspath(__file__)}" "%1"'
+        for subclave, valores in (
+            (r"Software\Classes\argos", {"": "URL:Argos", "URL Protocol": ""}),
+            (r"Software\Classes\argos\shell\open\command", {"": comando}),
+        ):
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, subclave, 0,
+                                    winreg.KEY_READ | winreg.KEY_WRITE) as llave:
+                for nombre, valor in valores.items():
+                    try:
+                        actual, tipo = winreg.QueryValueEx(llave, nombre)
+                    except OSError:
+                        actual, tipo = None, None
+                    if actual != valor or tipo != winreg.REG_SZ:
+                        winreg.SetValueEx(llave, nombre, 0, winreg.REG_SZ, valor)
+    except OSError as exc:
+        print(f"DEBUG protocolo Argos: {exc}")
+
+
+def enviar_recomendacion(clave):
+    try:
+        with socket.create_connection(("127.0.0.1", PUERTO_RECOMENDACIONES), timeout=0.7) as conexion:
+            conexion.sendall(f"RECO {clave}\n".encode("ascii"))
+            conexion.shutdown(socket.SHUT_WR)
+            return conexion.recv(16) == b"OK\n"
+    except OSError:
+        return False
+
+
+def escuchar_recomendaciones():
+    """El hilo vive durante el proceso (también durante login); jamás llama a Tk."""
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            servidor.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        servidor.bind(("127.0.0.1", PUERTO_RECOMENDACIONES))
+        servidor.listen(4)
+    except OSError:
+        servidor.close()
+        return
+
+    def recibir():
+        with servidor:
+            while True:
+                try:
+                    conexion, _ = servidor.accept()
+                except OSError:
+                    return
+                with conexion:
+                    try:
+                        conexion.settimeout(0.5)
+                        datos = b""
+                        limite = time.monotonic() + 0.7
+                        while len(datos) < 64 and b"\n" not in datos:
+                            conexion.settimeout(max(0.01, limite - time.monotonic()))
+                            bloque = conexion.recv(64 - len(datos))
+                            if not bloque:
+                                break
+                            datos += bloque
+                            if time.monotonic() >= limite:
+                                break
+                        match = re.fullmatch(rb"RECO (Leve|Moderada|Severa|BajaFrecuencia)\n", datos)
+                        if match:
+                            COLA_RECOMENDACIONES.put_nowait(match[1].decode("ascii"))
+                            conexion.sendall(b"OK\n")
+                    except (OSError, queue.Full):
+                        pass
+    threading.Thread(target=recibir, name="Argos recomendaciones", daemon=True).start()
+
+
+class VentanaRecomendacion(ctk.CTkToplevel):
+    """Guías no modales. PIL se prepara una vez por tamaño; el tick solo dibuja."""
+    _instancia = None
+    _cache = {}                 # PIL, nunca PhotoImage de un intérprete Tk anterior
+    _parpadeos = None
+    CIRCULOS = {
+        "Leve": ((305, 980, 128), (625, 981, 128), (948, 981, 128)),
+        "Moderada": ((304, 300, 162), (759, 235, 149), (1212, 365, 156)),
+        "Severa": ((277, 999, 149), (632, 996, 145), (979, 999, 147)),
+    }
+    # Todos los textos de la ventana, por nivel. "pasos" se muestran en la
+    # lista; "activos" reemplazan al paso mientras se está haciendo.
+    TEXTOS = {
+        "Leve": dict(
+            titulo="Asistente 20-20-20",
+            subtitulo="Pausa visual breve basada en la recomendación oftalmológica de la "
+                      "American Optometric Association.",
+            descripcion="Cada 20 minutos de uso continuo de pantalla, dirija la vista hacia un "
+                        "objeto situado a 6 metros de distancia, durante 20 segundos. Esta "
+                        "práctica relaja el músculo ciliar y previene la fatiga visual.",
+            pasos=("Cada 20 minutos de pantalla continua",
+                   "Mire a un objeto a 6 metros (20 pies) de distancia",
+                   "Mantenga la mirada durante 20 segundos"),
+            activos=("Preparando pausa visual...",
+                     "Dirija la vista a 6 metros de distancia",
+                     "Mantenga la mirada..."),
+            espera="Inicie el asistente cuando esté listo.",
+            final="¡Pausa completada! Vuelva a realizar la pausa en 20 minutos.",
+            iniciar="Iniciar asistente",
+            recordar=20,
+            pie="Argos es una herramienta de apoyo preventiva. No sustituye la evaluación oftalmológica profesional.",
+            pie_destacado=False,
+        ),
+        "Moderada": dict(
+            titulo="Pausa activa",
+            subtitulo="Interrumpa la actividad frente a la pantalla, descanse la vista y "
+                      "realice ejercicios breves de estiramiento y lubricación ocular.",
+            descripcion="Durante esta pausa, mantenga la vista alejada del monitor y combine "
+                        "descanso visual con parpadeo consciente para favorecer la "
+                        "lubricación natural del ojo.",
+            pasos=("Mire a un objeto a 6 metros de distancia durante 20 segundos",
+                   "Cierre los ojos y parpadee de forma consciente (30 segundos)",
+                   "Verifique y ajuste la iluminación ambiental del entorno"),
+            activos=("Dirija la vista a lo lejos — relajando el músculo ciliar",
+                     "Parpadee conscientemente para restaurar la película lagrimal",
+                     "Evite reflejos directos y contraste excesivo con la pantalla"),
+            espera="Seleccione la duración e inicie la pausa.",
+            final="¡Pausa completada! Retorne a su actividad con la vista descansada.",
+            iniciar="Iniciar pausa",
+            recordar=10,
+            pie="Argos es una herramienta de apoyo preventiva. No sustituye la evaluación oftalmológica profesional.",
+            pie_destacado=False,
+        ),
+        "Severa": dict(
+            titulo="Pausa prolongada",
+            subtitulo="Se detectaron indicadores sostenidos de fatiga visual. Interrumpa el "
+                      "uso de pantallas durante al menos 10 minutos y realice los ejercicios "
+                      "de relajación ocular descritos a continuación.",
+            descripcion="Esta pausa es necesaria para favorecer la recuperación visual. Si los "
+                        "síntomas persisten después del descanso, se recomienda consultar con "
+                        "un profesional oftalmólogo.",
+            pasos=("Mueva la vista de izquierda a derecha (5 repeticiones completas)",
+                   "Mueva la vista de arriba a abajo (5 repeticiones completas)",
+                   "Cierre los ojos y haga círculos lentos con la mirada "
+                   "(10 segundos en cada sentido)"),
+            activos=("Realice movimientos horizontales suaves",
+                     "Realice movimientos verticales suaves",
+                     "Movimientos circulares con los ojos cerrados"),
+            espera="Seleccione la duración e inicie la pausa.",
+            final="¡Pausa completada! Si los síntomas persisten, considere consultar con "
+                  "un oftalmólogo.",
+            iniciar="Iniciar pausa",
+            recordar=30,
+            pie="Si los síntomas de fatiga visual persisten de forma recurrente, consulte "
+                "con un profesional oftalmólogo. Argos no realiza diagnóstico clínico.",
+            pie_destacado=True,
+        ),
+    }
+
+    @property
+    def _textos(self):
+        return self.TEXTOS[self.nivel]
+
+    @classmethod
+    def abrir(cls, parent, clave):
+        if clave not in CLAVES_RECOMENDACION:
+            return
+        ventana = cls._instancia
+        if ventana is not None:
+            try:
+                if ventana.winfo_exists():
+                    ventana.mostrar(clave)
+                    ventana._al_frente()
+                    return ventana
+            except tk.TclError:
+                pass
+        ventana = cls(parent.winfo_toplevel(), clave)
+        cls._instancia = ventana
+        return ventana
+
+    def __init__(self, parent, clave):
+        super().__init__(parent)
+        self._raiz = parent
+        self._after = None
+        self._destruida = False
+        self._grab_anterior = None
+        self.configure(fg_color=TemaArgos.FONDO)
+        self.title("Argos — Recomendación")
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        esc = self._get_window_scaling()
+        izq, arriba, der, abajo = ToastArgos._area_trabajo(self)
+        w = min(980, int((der - izq - 32) / esc))
+        h = min(620, int((abajo - arriba - 60) / esc))
+        x = izq + (der - izq - round(w * esc)) // 2
+        y = arriba + (abajo - arriba - round(h * esc)) // 2
+        self.geometry(f"{w}x{h}{x:+d}{y:+d}")
+        self._cw, self._ch = round(w * 0.54 * esc), round((h - 32) * esc)
+        self.canvas = tk.Canvas(self, width=self._cw, height=self._ch,
+                                bg=TemaArgos.PANEL, highlightthickness=1,
+                                highlightbackground=TemaArgos.LINEA, bd=0)
+        self.canvas.place(x=round(12 * esc), y=round(16 * esc))
+        self.panel = ctk.CTkScrollableFrame(self, fg_color=TemaArgos.PANEL,
+                                          border_color=TemaArgos.LINEA, border_width=1,
+                                          corner_radius=TemaArgos.RADIO_CARD)
+        self.panel.place(relx=0.57, y=16, relwidth=0.415, relheight=0.94)
+        self.mostrar(clave)
+        self._al_frente()
+        self._after = self.after(33, self._tick)
+
+    def _al_frente(self):
+        self._raiz.deiconify()
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        # El aviso severo existente puede tener un grab. Transferirlo solo
+        # mientras se lee la guía para que no bloquee sus controles.
+        anterior = self.grab_current()
+        if anterior is not None and anterior is not self:
+            self._grab_anterior = anterior
+            self.grab_set()
+
+    @classmethod
+    def _preparar(cls, nivel, ancho, alto):
+        clave = (nivel, ancho, alto)
+        if clave in cls._cache:
+            return cls._cache[clave]
+        with Image.open(os.path.join(ASSETS_DIR, "recomendaciones",
+                                     nivel.lower() + "_original.png")) as archivo:
+            original = archivo.convert("RGBA")
+        fondo = Image.new("RGBA", original.size, TemaArgos.PANEL)
+        dibujo = ImageDraw.Draw(fondo)
+        if nivel == "Severa":
+            dibujo.rounded_rectangle((26, 26, 1228, 1228), radius=160, fill="white")
+        elif nivel == "Moderada":
+            dibujo.rounded_rectangle((8, 8, 1528, 1016), radius=55, fill="#193C2D")
+        fondo.alpha_composite(original)
+        escala = min((ancho - 16) / original.width, (alto - 16) / original.height)
+        tam = (round(original.width * escala), round(original.height * escala))
+        base = fondo.resize(tam, Image.Resampling.LANCZOS)
+        frames = [base]
+        if nivel == "Leve":
+            # Los párpados se dibujan ya al tamaño final (con las medidas de los
+            # ojos escaladas): a 1254 px tardaba ~6 s, así es ~10 veces más rápido.
+            chica = original.resize(tam, Image.Resampling.LANCZOS)
+            ojos = [(cx * escala, cy * escala, a * escala, b * escala, e * escala)
+                    for cx, cy, a, b, e in OJOS_RECO_LEVE]
+            frames = []
+            for i in range(10):
+                compuesto = Image.new("RGBA", tam, TemaArgos.PANEL)
+                compuesto.alpha_composite(parpadeo_parametrico(chica, ojos, i / 9))
+                frames.append(compuesto)
+        else:
+            # Silueta aproximada: incluye los brazos reales de Moderada (más
+            # anchos que la caja orientativa) y excluye las tres sugerencias.
+            mascara = Image.new("L", original.size, 0)
+            d = ImageDraw.Draw(mascara)
+            if nivel == "Moderada":
+                d.polygon([(95, 470), (180, 440), (540, 640), (525, 505),
+                           (605, 405), (715, 385), (810, 425), (850, 545),
+                           (840, 655), (1220, 625), (1290, 545), (1350, 560),
+                           (1370, 680), (1020, 865), (995, 978), (490, 978),
+                           (450, 855), (175, 655)], fill=255)
+                # El recorte no debe llevarse pedazos del aro de las sugerencias.
+                for ccx, ccy, cr in cls.CIRCULOS["Moderada"]:
+                    d.ellipse((ccx - cr - 22, ccy - cr - 22, ccx + cr + 22, ccy + cr + 22), fill=0)
+            else:
+                d.rounded_rectangle((940, 485, 1145, 825), radius=60, fill=255)
+            mascara = mascara.filter(ImageFilter.GaussianBlur(10)).resize(tam, Image.Resampling.LANCZOS)
+            personaje = base.copy()
+            personaje.putalpha(mascara)
+            # Fondo sin la figura original, para que no se duplique cuando el
+            # recorte se desplaza o rota. Moderada: se reconstruye el verde
+            # difuso con inpainting en una zona algo más amplia que la silueta
+            # (un desenfoque común arrastraba el gris del personaje y dejaba
+            # siluetas fantasma). Severa: fondo blanco liso.
+            if nivel == "Moderada":
+                zona = np.array(mascara) > 8
+                zona = cv2.dilate(zona.astype(np.uint8) * 255,
+                                  np.ones((max(3, round(46 * escala)),) * 2, np.uint8))
+                # Sin tocar los círculos de sugerencias: el inpainting estiraba
+                # su aro verde en manchas junto a los puños.
+                for ccx, ccy, cr in cls.CIRCULOS["Moderada"]:
+                    cv2.circle(zona, (round(ccx * escala), round(ccy * escala)),
+                               round((cr + 14) * escala), 0, -1)
+                rgb = np.array(base.convert("RGB"))
+                reconstruido = cv2.inpaint(rgb, zona, max(3, round(18 * escala)), cv2.INPAINT_TELEA)
+                reconstruido = cv2.GaussianBlur(reconstruido, (0, 0), max(2, 14 * escala))
+                relleno = Image.fromarray(reconstruido).convert("RGBA")
+                zona_suave = Image.fromarray(zona).filter(ImageFilter.GaussianBlur(max(2, round(8 * escala))))
+                limpio = base.copy()
+                limpio.paste(relleno, (0, 0), zona_suave)
+            else:
+                limpio = base.copy()
+                limpio.paste(Image.new("RGBA", tam, "white"), (0, 0), mascara)
+            frames = []
+            pivote = (round(760 * escala), round(1000 * escala))
+            # Franja inferior del marco fija: el personaje se corta contra ella
+            # y el borde no acompaña el balanceo.
+            corte = round(968 * escala) if nivel == "Moderada" else None
+            franja = base.crop((0, corte, tam[0], tam[1])) if corte else None
+            for i in range(24):
+                seno = math.sin(i * math.tau / 24)
+                capa = personaje
+                if nivel == "Moderada":
+                    capa = personaje.rotate(3 * seno, Image.Resampling.BICUBIC,
+                                             center=pivote)
+                cuadro = limpio.copy()
+                sube = 4 if nivel == "Moderada" else 7
+                cuadro.alpha_composite(capa, (0, round(-sube * escala * seno)))
+                if franja is not None:
+                    cuadro.paste(franja, (0, corte))
+                frames.append(cuadro)
+        iconos = []
+        for cx, cy, radio in cls.CIRCULOS[nivel]:
+            r = round(radio * escala)
+            x, y = round(cx * escala), round(cy * escala)
+            recorte = base.crop((x - r, y - r, x + r, y + r))
+            mask = Image.new("L", recorte.size, 0)
+            ImageDraw.Draw(mask).ellipse((1, 1, 2*r-1, 2*r-1), fill=255)
+            recorte.putalpha(mask)
+            oscuro = Image.new("RGBA", recorte.size, TemaArgos.PANEL)
+            oscuro = Image.blend(recorte, oscuro, 0.72)
+            oscuro.putalpha(mask)
+            pulsos, aparicion = [], []
+            for i in range(12):
+                factor = 1 + 0.06 * i / 11
+                pulsos.append(recorte.resize((round(2*r*factor), round(2*r*factor)),
+                                             Image.Resampling.LANCZOS))
+                t = i / 11
+                factor = 0.6 + 0.45 * t / 0.75 if t < 0.75 else 1.05 - 0.05*(t-0.75)/0.25
+                pop = recorte.resize((round(2*r*factor), round(2*r*factor)), Image.Resampling.LANCZOS)
+                pop.putalpha(pop.getchannel("A").point(lambda a, t=t: round(a*t)))
+                aparicion.append(pop)
+            iconos.append((oscuro, pulsos, aparicion))
+        resultado = (frames, iconos, escala, tam)
+        # Acotar memoria si cambia la resolución entre sesiones.
+        if len(cls._cache) >= 6:
+            cls._cache.pop(next(iter(cls._cache)))
+        cls._cache[clave] = resultado
+        return resultado
+
+    def mostrar(self, clave):
+        self.clave = clave
+        self.nivel = "Leve" if clave == "BajaFrecuencia" else clave
+        self.color = GestorAlertas.COLORES[self.nivel]
+        self._inicio = None
+        self._terminado = False
+        self._etapa = -1
+        self._mostrada = time.monotonic()
+        self._parpadeo = self._mostrada
+        self._proximo_parpadeo = self._mostrada + random.uniform(3, 5)
+        self._topmost_hasta = self._mostrada + 1.5
+        self.attributes("-topmost", True)
+        for widget in self.panel.winfo_children():
+            widget.destroy()
+        self.canvas.delete("all")
+        self._frames, self._iconos = [], []
+        try:
+            frames, iconos, self._escala, tam = self._preparar(self.nivel, self._cw, self._ch)
+            self._frames = [ImageTk.PhotoImage(img, master=self) for img in frames]
+            self._iconos = [(ImageTk.PhotoImage(osc, master=self),
+                             [ImageTk.PhotoImage(img, master=self) for img in pul],
+                             [ImageTk.PhotoImage(img, master=self) for img in pop])
+                            for osc, pul, pop in iconos]
+            self._ox, self._oy = (self._cw-tam[0])/2, (self._ch-tam[1])/2
+            self._imagen = self.canvas.create_image(self._ox, self._oy, anchor="nw", image=self._frames[0])
+        except (OSError, ValueError) as exc:
+            self.canvas.create_text(self._cw/2, self._ch/2, text="Ilustración no disponible",
+                                    fill=TemaArgos.TEXTO)
+            print(f"DEBUG recomendación: {exc}")
+        textos = self._textos
+        self._label(textos["titulo"], 23, self.color, "bold")
+        self._label(textos["subtitulo"], 13, TemaArgos.TEXTO)
+        self._label(textos["descripcion"], 12)
+        self._filas = [self._label(f"{i+1}. {paso}", 13) for i, paso in enumerate(textos["pasos"])]
+        self._estado = self._label(textos["espera"], 14)
+        self._reloj = self._label("", 30, self.color, "bold")
+        self._barra = ctk.CTkProgressBar(self.panel, progress_color=self.color,
+                                        fg_color=TemaArgos.LINEA)
+        self._barra.pack(fill="x", padx=12, pady=8)
+        self._barra.set(0)
+        self._duracion = tk.StringVar(master=self, value="2" if self.nivel == "Moderada" else "10")
+        self._selector = None
+        if self.nivel != "Leve":
+            self._label("Duración (minutos)", 12)
+            self._selector = ctk.CTkSegmentedButton(self.panel, values=["2", "3", "5"] if self.nivel == "Moderada" else ["10", "15"],
+                                                   variable=self._duracion, selected_color=TemaArgos.ACENTO)
+            self._selector.pack(fill="x", padx=12, pady=6)
+        self._iniciar_btn = ctk.CTkButton(self.panel, text=textos["iniciar"],
+                                         command=self._iniciar, fg_color=TemaArgos.ACENTO,
+                                         hover_color=TemaArgos.ACENTO_VIVO)
+        self._iniciar_btn.pack(fill="x", padx=12, pady=8)
+        self._recordar_btn = ctk.CTkButton(self.panel, text=f"Recordarme en {textos['recordar']} min",
+                                          command=self._recordar,
+                                          fg_color=TemaArgos.ACENTO, hover_color=TemaArgos.ACENTO_VIVO)
+        self._cerrar_btn = ctk.CTkButton(self.panel, text="Cerrar", command=self.destroy,
+                                         fg_color=TemaArgos.PANEL_ALTO)
+        self._cerrar_btn.pack(fill="x", padx=12, pady=8)
+        pie = self._label(textos["pie"], 11, TemaArgos.ALERTA if textos["pie_destacado"]
+                          else TemaArgos.TEXTO_TENUE)
+        if textos["pie_destacado"]:
+            pie.configure(fg_color=TemaArgos.PANEL_ALTO)
+
+    def _label(self, texto, tam, color=None, peso="normal"):
+        label = ctk.CTkLabel(self.panel, text=texto, font=TemaArgos.ui(tam, peso),
+                             text_color=color or TemaArgos.TEXTO_SUAVE, anchor="w",
+                             justify="left", wraplength=max(160, self._cw/self._get_window_scaling()*0.64),
+                             corner_radius=TemaArgos.RADIO_CARD)
+        label.pack(fill="x", padx=12, pady=6)
+        return label
+
+    def _iniciar(self):
+        self._inicio = time.monotonic()
+        self._etapa = -2  # También refrescar la instrucción tras la vista previa.
+        self._parpadeo = self._inicio
+        self._total = 29 if self.nivel == "Leve" else int(self._duracion.get()) * 60
+        self._iniciar_btn.configure(state="disabled")
+        if self._selector:
+            self._selector.configure(state="disabled")
+
+    def _recordar(self):
+        """Recordatorio pedido por el usuario: solo los avisos (app y Windows)
+        del nivel, con el enlace a esta pantalla; sin sonido ni ventana modal."""
+        raiz, clave, nivel = self._raiz, self.clave, self.nivel
+        minutos = self._textos["recordar"]
+        def avisar():
+            if raiz.winfo_exists():
+                gestor = getattr(getattr(raiz, "monitoreo", None), "alertas", None)
+                if gestor is None:
+                    gestor = GestorAlertas(raiz)
+                texto, fuente = GestorAlertas.RECOMENDACIONES.get(clave, ("", ""))
+                gestor.notificar(f"Recordatorio · {self.TEXTOS[nivel]['titulo']}", texto, fuente,
+                                 GestorAlertas.COLORES[nivel],
+                                 os.path.join(ASSETS_DIR, "alertas", GestorAlertas.IMAGENES[clave]),
+                                 GestorAlertas.ACCIONES.get(clave, texto), nivel, clave)
+        anterior = getattr(raiz, "_recordatorio_recomendacion", None)
+        if anterior:
+            raiz.after_cancel(anterior)
+        raiz._recordatorio_recomendacion = raiz.after(minutos * 60 * 1000, avisar)
+        self._recordar_btn.configure(text=f"Recordatorio programado en {minutos} min",
+                                     state="disabled")
+
+    def _punto(self, x, y):
+        return self._ox + x*self._escala, self._oy + y*self._escala
+
+    def _circulo(self, x, y, radio):
+        cx, cy = self._punto(x, y)
+        r = radio*self._escala
+        return cx-r, cy-r, cx+r, cy+r
+
+    def _tick(self):
+        self._after = None
+        if self._destruida:
+            return
+        ahora = time.monotonic()
+        t = ahora - self._mostrada
+        if self._topmost_hasta and ahora >= self._topmost_hasta:
+            self.attributes("-topmost", False)
+            self._topmost_hasta = None
+        transcurrido = max(0, ahora-self._inicio) if self._inicio is not None else 0
+        activo = self._inicio is not None and not self._terminado
+        etapa = -1
+        restante = 0
+        if activo:
+            restante = max(0, math.ceil(self._total-transcurrido))
+            etapa = (0 if transcurrido < 4 else 1 if transcurrido < 9 else 2) if self.nivel == "Leve" else int(transcurrido//20) % 3
+            if transcurrido >= self._total:
+                self._terminado = True
+                activo = False
+                etapa = 3
+                self._estado.configure(text=self._textos["final"])
+                self._recordar_btn.pack(fill="x", padx=12, pady=8, before=self._cerrar_btn)
+            self._barra.set(min(1, transcurrido/self._total))
+            cuenta = max(0, math.ceil(29-transcurrido)) if self.nivel == "Leve" and etapa >= 2 else restante
+            self._reloj.configure(text=(str(cuenta) if self.nivel == "Leve" and etapa >= 2 else
+                                       f"{restante//60:02d}:{restante%60:02d}") if self.nivel != "Leve" or etapa >= 2 else "")
+        elif self._terminado:
+            etapa = 3
+        elif self.nivel == "Moderada":
+            etapa = min(2, int(t/1.2))
+        if etapa != self._etapa:
+            self._etapa = etapa
+            self._parpadeo = ahora
+            for i, fila in enumerate(self._filas):
+                hecho = etapa == 3 or (self.nivel == "Leve" and i < etapa)
+                fila.configure(text=f"{'✓' if hecho else str(i+1)+'.'} {self._textos['pasos'][i]}",
+                               fg_color=TemaArgos.PANEL_ALTO if i == etapa else "transparent",
+                               text_color=TemaArgos.OK if hecho else self.color if i == etapa else TemaArgos.TEXTO_SUAVE)
+            if activo:
+                self._estado.configure(text=self._textos["activos"][etapa])
+        self.canvas.delete("animacion")
+        if self._frames:
+            if ahora >= self._proximo_parpadeo:
+                self._parpadeo = ahora
+                self._proximo_parpadeo = ahora + random.uniform(3, 5)
+            dt = ahora-self._parpadeo
+            k = dt/0.09 if dt < 0.09 else max(0, 1-(dt-0.09)/0.14)
+            indice = round(min(1, k)*9) if self.nivel == "Leve" else int(t/2.4*24) % 24
+            self.canvas.itemconfigure(self._imagen, image=self._frames[indice])
+            for i, (cx, cy, r) in enumerate(self.CIRCULOS[self.nivel]):
+                oscuro, pulsos, pop = self._iconos[i]
+                hecho = etapa == 3 or (self.nivel == "Leve" and i < etapa)
+                imagen = pulsos[0] if hecho else oscuro
+                if i == etapa:
+                    imagen = pulsos[round((math.sin(t*3)+1)*5.5)]
+                if self.nivel == "Moderada":
+                    aparicion = (t-i*1.2)/0.65
+                    if aparicion < 1:
+                        self.canvas.create_image(*self._punto(cx, cy), image=oscuro, tags="animacion")
+                        imagen = pop[max(0, min(11, int(aparicion*11)))]
+                self.canvas.create_image(*self._punto(cx, cy), image=imagen, tags="animacion")
+                if hecho:
+                    self.canvas.create_text(*self._punto(cx+r*0.65, cy-r*0.65), text="✓",
+                                            fill=TemaArgos.OK, font=("Segoe UI", 22, "bold"), tags="animacion")
+                if self.nivel == "Severa" and i == etapa and activo:
+                    self.canvas.create_oval(*self._circulo(cx, cy, r*(1.02+0.03*math.sin(t*4))),
+                                            outline=self.color, width=3, tags="animacion")
+                    desplazamiento = 40*math.sin(t*3)
+                    if i < 2:
+                        ax, ay = (cx+desplazamiento, cy+60) if i == 0 else (cx+60, cy+desplazamiento)
+                        inicio = self._punto(ax-45 if i == 0 else ax, ay-45 if i == 1 else ay)
+                        fin = self._punto(ax+45 if i == 0 else ax, ay+45 if i == 1 else ay)
+                        self.canvas.create_line(*inicio, *fin, fill=self.color, width=4, arrow=tk.BOTH, tags="animacion")
+                    else:
+                        angulo = t*100 % 360
+                        self.canvas.create_arc(*self._circulo(cx, cy, 90), start=angulo, extent=260,
+                                               style=tk.ARC, outline=self.color, width=4, tags="animacion")
+                        rad = math.radians(angulo+260)
+                        ex, ey = cx+90*math.cos(rad), cy-90*math.sin(rad)
+                        self.canvas.create_line(*self._punto(ex-14*math.sin(rad), ey-14*math.cos(rad)),
+                                                *self._punto(ex, ey), arrow=tk.LAST, fill=self.color, width=4, tags="animacion")
+            if self.nivel == "Leve" and activo:
+                if etapa == 1:
+                    f = (transcurrido-4) % 1.5 / 1.5
+                    self.canvas.create_oval(*self._circulo(660+325*f, 520+90*f, 12),
+                                            fill="#E5FFD8", outline=self.color, tags="animacion")
+                elif etapa == 2:
+                    self.canvas.create_arc(*self._circulo(948, 981, 140), start=90,
+                                           extent=-359.9*max(0, (29-transcurrido)/20), style=tk.ARC,
+                                           outline=self.color, width=5, tags="animacion")
+            elif self.nivel == "Severa":
+                caja = self._circulo(977, 282, 125)
+                self.canvas.create_oval(*caja, fill="white", outline="white", tags="animacion")
+                fraccion = max(0, 1-transcurrido/self._total) if self._inicio is not None else 1
+                self.canvas.create_arc(*caja, start=90, extent=-359.9*fraccion,
+                                       fill=self.color, outline=self.color, tags="animacion")
+                segundos = restante if self._inicio is not None else int(self._duracion.get())*60
+                self.canvas.create_text(*self._punto(977, 282), text=f"{segundos//60:02d}:{segundos%60:02d}",
+                                        fill=TemaArgos.FONDO, font=("Consolas", max(13, round(45*self._escala)), "bold"), tags="animacion")
+        self._after = self.after(33, self._tick)
+
+    def destroy(self):
+        self._destruida = True
+        if self._after is not None:
+            self.after_cancel(self._after)
+            self._after = None
+        if type(self)._instancia is self:
+            type(self)._instancia = None
+        if self._grab_anterior is not None:
+            try:
+                self.grab_release()
+                if self._grab_anterior.winfo_exists():
+                    self._grab_anterior.grab_set()
+            except tk.TclError:
+                pass
+        super().destroy()
+
+
 class ToastArgos(ctk.CTkToplevel):
     """Aviso propio en la esquina inferior derecha, por encima de otras ventanas.
 
     Respaldo del toast nativo de Windows: si el usuario tiene el Asistente de
     concentración activo, o las notificaciones de la app silenciadas, el toast
-    del sistema no aparece y tampoco da error. Este siempre se ve."""
+    del sistema no aparece y tampoco da error. Este siempre se ve.
 
-    ANCHO, ALTO = 380, 132
+    Lleva el personaje del nivel con los ojos animados: parpadea rápido en
+    Leve, lento y pesado en Moderada, y en Severa intenta abrir los ojos y se
+    le vuelven a cerrar. Entra con fundido y deslizamiento; una barra muestra
+    el tiempo que queda y pasar el mouse lo pausa."""
+
+    ANCHO, ALTO = 400, 132
     DURACION_MS = 9000
+    AVATAR = 76            # px lógicos
+    TICK_MS = 16
 
-    def __init__(self, parent, titulo, cuerpo, fuente, color):
+    # Zona de cada ojo en las imágenes de assets/alertas (512 px): elipses que
+    # empiezan debajo de las cejas, comunes a los cuatro personajes.
+    OJOS = [(172, 211, 240, 266), (272, 211, 340, 266)]
+    NIVELES_K = 13          # cuadros entre ojo abierto (0) y cerrado (1)
+
+    # Parpadeo por nivel: ms de cierre, pausa y apertura; apertura→cierre
+    # (desde/hasta, 0 = abierto, 1 = cerrado); espera entre parpadeos (s).
+    PERFILES = {
+        "Leve":     dict(cierre=90,  pausa=50,  apertura=140, desde=0.0, hasta=1.0,
+                         espera=(2.2, 4.0), primera=0.7, doble=0.20),
+        "Moderada": dict(cierre=200, pausa=170, apertura=340, desde=0.0, hasta=1.0,
+                         espera=(1.8, 3.0), primera=0.6, doble=0.0),
+        "Severa":   dict(cierre=380, pausa=260, apertura=240, desde=1.0, hasta=0.5,
+                         espera=(1.6, 2.8), primera=0.8, doble=0.0),
+    }
+    _cache_cuadros = {}     # (imagen, nivel, lado) -> [PhotoImage]; se arma una vez
+
+    def __init__(self, parent, titulo, cuerpo, fuente, color, imagen=None, nivel=None, clave=None):
         super().__init__(parent)
+        self._recomendacion_parent = parent
+        self._clave_recomendacion = clave or nivel or "Leve"
         self.overrideredirect(True)
         self.configure(fg_color=TemaArgos.PANEL)
         try:
             self.attributes("-topmost", True)
+            self.attributes("-alpha", 0.0)
         except Exception:
             pass
 
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{self.ANCHO}x{self.ALTO}+{sw - self.ANCHO - 24}+{sh - self.ALTO - 64}")
+        # Posición en píxeles físicos: CTk escala el tamaño pero no la posición,
+        # y winfo_screenwidth() devuelve unidades lógicas (1536 en vez de 1920
+        # al 125 %). Se usa el área de trabajo de Windows (sin la barra de tareas).
+        esc = self._get_window_scaling()
+        _, _, der, abajo = self._area_trabajo()
+        self._x_final = der - round(self.ANCHO * esc) - round(16 * esc)
+        self._y = abajo - round(self.ALTO * esc) - round(16 * esc)
+        self._abajo = abajo
+        self._desliz = round(36 * esc)
+        self.geometry(f"{self.ANCHO}x{self.ALTO}+{self._x_final + self._desliz}+{self._y}")
+
+        self._nivel = nivel
+        self._vivo = True
+        self._t0 = time.monotonic()
+        self._restante_ms = self.DURACION_MS
+        self._pausado = False
+        self._ultimo_tick = self._t0
 
         # Franja de color: el nivel se reconoce antes de leer el texto.
         ctk.CTkFrame(self, width=4, fg_color=color, corner_radius=0).place(
             relx=0, rely=0, relheight=1)
 
+        # Personaje del nivel (Canvas: permite animarlo sin recrear widgets).
+        self._perfil = self.PERFILES.get(nivel, self.PERFILES["Leve"])
+        self._frames = self._preparar_frames(imagen, nivel, esc)
+        self._k = self._perfil["desde"]
+        self._parpadeo_t0 = self._perfil["primera"]          # s desde la aparición
+        self._dobles = 0
+        lado = round(self.AVATAR * esc)
+        self._lienzo = tk.Canvas(self, width=lado, height=lado, bg=TemaArgos.PANEL,
+                                 highlightthickness=0, bd=0)
+        texto_x = 18
+        if self._frames:
+            self._lienzo.place(x=round(16 * esc), y=round(((self.ALTO - self.AVATAR) / 2 - 4) * esc))
+            self._centro = lado / 2
+            self._item = self._lienzo.create_image(self._centro, self._centro,
+                                                   image=self._frame(self._k))
+            texto_x = 16 + self.AVATAR + 12
+
         cuerpo_fr = ctk.CTkFrame(self, fg_color="transparent")
-        cuerpo_fr.pack(fill="both", expand=True, padx=(18, 14), pady=12)
+        cuerpo_fr.pack(fill="both", expand=True, padx=(texto_x, 14), pady=(12, 14))
+        ancho_txt = self.ANCHO - texto_x - 20
 
         fila = ctk.CTkFrame(cuerpo_fr, fg_color="transparent")
         fila.pack(fill="x")
         ctk.CTkLabel(fila, text=titulo, font=TemaArgos.ui(13, "bold"),
-                     text_color=color, anchor="w").pack(side="left")
+                     text_color=color, anchor="w", justify="left",
+                     wraplength=ancho_txt - 30).pack(side="left")
         ctk.CTkButton(fila, text="✕", width=22, height=22, font=TemaArgos.ui(11),
                       fg_color="transparent", hover_color=TemaArgos.PANEL_ALTO,
                       text_color=TemaArgos.TEXTO_TENUE,
                       corner_radius=TemaArgos.RADIO,
-                      command=self._cerrar).pack(side="right")
+                      command=self._cerrar).pack(side="right", anchor="n")
 
         ctk.CTkLabel(cuerpo_fr, text=cuerpo, font=TemaArgos.ui(11),
                      text_color=TemaArgos.TEXTO_SUAVE, anchor="w",
-                     justify="left", wraplength=330).pack(fill="x", pady=(4, 0))
+                     justify="left", wraplength=ancho_txt).pack(fill="x", pady=(4, 0))
         ctk.CTkLabel(cuerpo_fr, text=fuente, font=TemaArgos.dato(9),
                      text_color=TemaArgos.TEXTO_TENUE, anchor="w",
-                     justify="left", wraplength=330).pack(fill="x", pady=(6, 0))
+                     justify="left", wraplength=ancho_txt).pack(fill="x", pady=(6, 0))
 
-        self.after(self.DURACION_MS, self._cerrar)
+        def enlazar_cuerpo(widget):
+            if isinstance(widget, ctk.CTkButton):
+                return
+            widget.bind("<Button-1>", self._abrir_recomendacion, add="+")
+            # CTkLabel.bind ya cubre sus componentes internos.
+            if isinstance(widget, (ctk.CTkFrame, tk.Frame)):
+                for hijo in widget.winfo_children():
+                    if isinstance(hijo, (ctk.CTkFrame, ctk.CTkLabel)):
+                        enlazar_cuerpo(hijo)
+        enlazar_cuerpo(cuerpo_fr)
+        self._lienzo.bind("<Button-1>", self._abrir_recomendacion)
+        ctk.CTkButton(cuerpo_fr, text="Ver recomendación", height=26,
+                      fg_color=TemaArgos.ACENTO, hover_color=TemaArgos.ACENTO_VIVO,
+                      command=self._abrir_recomendacion).pack(fill="x", pady=(6, 0))
 
-    def _cerrar(self):
+        # Barra de tiempo restante, abajo de todo.
+        self._barra = tk.Canvas(self, height=max(2, round(3 * esc)), bg=TemaArgos.PANEL,
+                                highlightthickness=0, bd=0)
+        self._barra.place(relx=0, rely=1, relwidth=1, anchor="sw")
+        self._barra_item = self._barra.create_rectangle(0, 0, 0, 10, fill=color, width=0)
+
+        # El texto puede pedir más alto que el previsto: crecer, nunca cortar.
+        self.update_idletasks()
+        alto = max(self.ALTO, math.ceil(cuerpo_fr.winfo_reqheight() / esc) + 26)
+        if alto != self.ALTO:
+            self._y = self._abajo - round(alto * esc) - round(16 * esc)
+            self.geometry(f"{self.ANCHO}x{alto}+{self._x_final + self._desliz}+{self._y}")
+
+        for w in (self,):
+            w.bind("<Enter>", lambda e: self._pausar(True), add="+")
+            w.bind("<Leave>", lambda e: self._pausar(False), add="+")
+        self._after = self.after(self.TICK_MS, self._tick)
+
+    def _abrir_recomendacion(self, event=None):
+        if not self._vivo:
+            return
+        VentanaRecomendacion.abrir(self._recomendacion_parent, self._clave_recomendacion)
+        # Se oculta ya pero se destruye después: CTkToplevel guarda el widget
+        # con foco (este aviso) ~200 ms después de crear la ventana nueva y
+        # luego le devuelve el foco; si ya no existe, Tk lanza "bad window path".
         try:
-            self.destroy()
+            self.attributes("-alpha", 0.0)
         except Exception:
             pass
+        self.after(700, self._cerrar)
+
+    def _area_trabajo(self):
+        """(izq, arriba, der, abajo) del área de trabajo en píxeles físicos."""
+        try:
+            from ctypes import wintypes
+            r = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0):  # SPI_GETWORKAREA
+                return r.left, r.top, r.right, r.bottom
+        except Exception:
+            pass
+        esc = self._get_window_scaling()
+        return 0, 0, round(self.winfo_screenwidth() * esc), round(self.winfo_screenheight() * esc)
+
+    # ── Cuadros del personaje ─────────────────────────
+    @classmethod
+    def _cuadro_ojos(cls, base, abierto, cerrado, k, mascara):
+        """Ojos a k de cerrarse (0 abierto, 1 cerrado), pegados sobre 'base'.
+        Dentro de cada elipse el ojo abierto se aplasta hacia la línea inferior
+        (el párpado baja) y al final se funde con los ojos cerrados reales."""
+        aplastado = abierto.copy()
+        for x0, y0, x1, y1 in cls.OJOS:
+            alto = y1 - y0
+            nuevo = max(1, round(alto * (1 - 0.85 * k)))
+            trozo = abierto.crop((x0, y0, x1, y1)).resize((x1 - x0, nuevo),
+                                                          Image.Resampling.LANCZOS)
+            zona = cerrado.crop((x0, y0, x1, y1))
+            zona.alpha_composite(trozo, (0, alto - nuevo - round(alto * 0.12 * k)))
+            aplastado.paste(zona, (x0, y0))
+        ojos = Image.blend(aplastado, cerrado, min(1.0, max(0.0, (k - 0.55) / 0.40)))
+        resultado = base.copy()
+        resultado.paste(ojos, (0, 0), mascara)
+        return resultado
+
+    def _preparar_frames(self, imagen, nivel, esc):
+        if not imagen or not os.path.isfile(imagen):
+            return None
+        lado = round(self.AVATAR * esc)
+        clave = (imagen, nivel, lado)
+        if clave in self._cache_cuadros:
+            return self._cache_cuadros[clave]
+        carpeta = os.path.dirname(imagen)
+        try:
+            abrir = lambda n: Image.open(os.path.join(carpeta, n)).convert("RGBA")
+            base = Image.open(imagen).convert("RGBA")
+            cerrado = abrir("fatiga_severa.png")
+            # Severa ya tiene los ojos cerrados: los "intentos de abrir" usan
+            # los ojos entrecerrados de Moderada, sobre la imagen roja.
+            abierto = abrir("fatiga_moderada.png") if nivel == "Severa" else base
+            if base.size != cerrado.size or base.size != abierto.size:
+                raise ValueError("tamaños distintos")
+            mascara = Image.new("L", base.size, 0)
+            dibujo = ImageDraw.Draw(mascara)
+            for caja in self.OJOS:
+                dibujo.ellipse(caja, fill=255)
+            mascara = mascara.filter(ImageFilter.GaussianBlur(4))
+            cuadros = []
+            for i in range(self.NIVELES_K):
+                k = i / (self.NIVELES_K - 1)
+                img = self._cuadro_ojos(base, abierto, cerrado, k, mascara)
+                cuadros.append(ImageTk.PhotoImage(
+                    img.resize((lado, lado), Image.Resampling.LANCZOS)))
+        except Exception as e:
+            print(f"DEBUG ToastArgos sin animación de ojos: {e}")
+            try:
+                cuadros = [ImageTk.PhotoImage(Image.open(imagen).convert("RGBA").resize(
+                    (lado, lado), Image.Resampling.LANCZOS))] * self.NIVELES_K
+            except Exception:
+                return None
+        self._cache_cuadros[clave] = cuadros
+        return cuadros
+
+    def _frame(self, k):
+        return self._frames[round(min(1.0, max(0.0, k)) * (self.NIVELES_K - 1))]
+
+    def _k_parpadeo(self, t_s):
+        """Apertura de los ojos en el instante t_s (s desde la aparición)."""
+        p = self._perfil
+        dt = (t_s - self._parpadeo_t0) * 1000
+        if dt < 0:
+            return p["desde"]
+        c, h, a = p["cierre"], p["pausa"], p["apertura"]
+        if dt < c:                                   # ease-in: el párpado cae
+            f = (dt / c) ** 2
+        elif dt < c + h:
+            f = 1.0
+        elif dt < c + h + a:                         # ease-out: se abre suave
+            f = (1 - (dt - c - h) / a) ** 2
+        else:
+            # terminó: programar el próximo (a veces uno doble enseguida)
+            if p["doble"] and self._dobles == 0 and random.random() < p["doble"]:
+                self._dobles = 1
+                self._parpadeo_t0 = t_s + 0.12
+            else:
+                self._dobles = 0
+                self._parpadeo_t0 = t_s + random.uniform(*p["espera"])
+            return p["desde"]
+        return p["desde"] + (p["hasta"] - p["desde"]) * f
+
+    # ── Animación ────────────────────────────────────
+    def _tick(self):
+        if not self._vivo:
+            return
+        ahora = time.monotonic()
+        t = (ahora - self._t0) * 1000           # ms desde que apareció
+
+        # Entrada: fundido + deslizamiento (220 ms, ease-out)
+        k = min(1.0, t / 220)
+        suave = 1 - (1 - k) ** 3
+        try:
+            self.attributes("-alpha", 0.97 * suave)
+        except Exception:
+            pass
+        x = self._x_final + round(self._desliz * (1 - suave))
+        self.geometry(f"+{x}+{self._y}")
+
+        if self._frames:
+            k = self._k_parpadeo(t / 1000)
+            if abs(k - self._k) > 1e-3:
+                self._k = k
+                self._lienzo.itemconfigure(self._item, image=self._frame(k))
+
+        # Tiempo restante (se congela con el mouse encima)
+        dt = (ahora - self._ultimo_tick) * 1000
+        self._ultimo_tick = ahora
+        if not self._pausado:
+            self._restante_ms -= dt
+        ancho = self._barra.winfo_width()
+        self._barra.coords(self._barra_item, 0, 0,
+                           ancho * max(0.0, self._restante_ms) / self.DURACION_MS, 10)
+        if self._restante_ms <= 0:
+            self._cerrar()
+            return
+        self._after = self.after(self.TICK_MS, self._tick)
+
+    def _pausar(self, pausado):
+        # <Leave> también llega al pasar a un hijo: confirmar con el puntero.
+        if not pausado:
+            x, y = self.winfo_pointerxy()
+            dentro = (self.winfo_rootx() <= x < self.winfo_rootx() + self.winfo_width()
+                      and self.winfo_rooty() <= y < self.winfo_rooty() + self.winfo_height())
+            if dentro:
+                return
+        self._pausado = pausado
+
+    def _cerrar(self):
+        """Se desvanece (160 ms) y recién ahí se destruye."""
+        if not self._vivo:
+            return
+        self._vivo = False
+        try:
+            self.after_cancel(self._after)
+        except Exception:
+            pass
+        inicio = time.monotonic()
+        alfa0 = float(self.attributes("-alpha") or 0.97)
+
+        def paso():
+            k = (time.monotonic() - inicio) / 0.16
+            if k >= 1:
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+                return
+            try:
+                self.attributes("-alpha", alfa0 * (1 - k))
+                self.after(self.TICK_MS, paso)
+            except Exception:
+                pass
+        paso()
 
 
 class DialogoPausa(ctk.CTkToplevel):
@@ -2417,9 +3849,14 @@ class DialogoPausa(ctk.CTkToplevel):
         self.respuesta = None
         self._al_responder = al_responder  # se llama con la respuesta tras cerrar
 
-        w, h = 520, 400
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        # Centrado en píxeles físicos (winfo_screenwidth() da unidades lógicas
+        # y la ventana quedaba corrida hacia arriba a la izquierda).
+        w, h = 520, 450
+        esc = self._get_window_scaling()
+        izq, arriba, der, abajo = ToastArgos._area_trabajo(self)
+        x = izq + (der - izq - round(w * esc)) // 2
+        y = arriba + (abajo - arriba - round(h * esc)) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
         aplicar_icono(self)
         try:
             self.attributes("-topmost", True)
@@ -2471,6 +3908,13 @@ class DialogoPausa(ctk.CTkToplevel):
                       corner_radius=TemaArgos.RADIO,
                       command=lambda: self._responder("posponer")).pack(side="left", padx=6)
 
+        # Acceso directo a la pausa guiada (antes solo desde las notificaciones).
+        ctk.CTkButton(self, text="Ver recomendación", width=332, height=36,
+                      font=TemaArgos.ui(13, "bold"), fg_color=GestorAlertas.COLORES["Severa"],
+                      hover_color=TemaArgos.RIESGO, text_color=TemaArgos.TEXTO,
+                      corner_radius=TemaArgos.RADIO,
+                      command=lambda: self._responder("recomendacion")).pack(pady=(12, 0))
+
         self.lift()
         self.focus_force()
         self.grab_set()          # bloqueante: es el punto del canal
@@ -2513,27 +3957,27 @@ class GestorAlertas:
     # repetiría en cada cuadro (~15 por segundo).
     COOLDOWN = {"Leve": 300, "Moderada": 180, "Severa": 120}
 
-    COLORES = {"Leve": TemaArgos.ALERTA, "Moderada": TemaArgos.ALERTA,
-               "Severa": TemaArgos.RIESGO}
+    COLORES = {"Leve": "#2E86DE", "Moderada": "#F1C40F",
+               "Severa": "#E24B4A"}
 
     RECOMENDACIONES = {
         "Leve": (
             "Fatiga leve detectada. Se recomienda aplicar la regla 20-20-20: "
-            "mire durante 20 segundos un punto ubicado a al menos 6 metros de "
-            "distancia.",
+            "cada 20 minutos, mire durante 20 segundos un punto ubicado a 20 pies "
+            "(unos 6 metros) de distancia.",
             "Basado en la regla 20-20-20 (American Optometric Association)."
         ),
         "Moderada": (
-            "Fatiga moderada detectada. Se recomienda una pausa activa de al "
-            "menos 2 minutos: aléjese del monitor, parpadee de forma consciente "
+            "Fatiga moderada: considere una pausa. Se recomienda una pausa activa "
+            "de 2 a 5 minutos: aléjese del monitor, parpadee de forma consciente "
             "y ajuste la iluminación del entorno si es posible.",
             "Basado en TFOS DEWS II (Wolffsohn et al., 2017) y Coles-Brennan et al. (2019)."
         ),
         "Severa": (
-            "Fatiga severa detectada. Se recomienda interrumpir el uso de la "
-            "pantalla durante al menos 10 minutos y realizar ejercicios de "
-            "relajación ocular. Si los síntomas persisten, considere consultar "
-            "con un especialista.",
+            "Fatiga severa: haga una pausa inmediata. Se recomienda interrumpir "
+            "el uso de la pantalla durante 10 a 15 minutos y realizar ejercicios "
+            "oculares. Si los síntomas persisten, considere consultar con un "
+            "especialista.",
             "Basado en Coles-Brennan et al. (2019) y las recomendaciones de la AOA."
         ),
         # Disparador propio: frecuencia de parpadeo anormalmente baja. Se trata
@@ -2583,18 +4027,44 @@ class GestorAlertas:
         self.disparar(clave, nivel_canal, indice, perclos, bpm)
 
     # ── Disparo ──────────────────────────────────────
+    # Cuerpo corto para la notificación de Windows: solo la acción recomendada
+    # (el título ya dice el nivel; el texto completo queda en el aviso propio).
+    ACCIONES = {
+        "Leve":           "Aplique la regla 20-20-20: cada 20 minutos, mire 20 segundos un punto a 6 metros.",
+        "Moderada":       "Haga una pausa activa de 2 a 5 minutos y parpadee de forma consciente.",
+        "Severa":         "Haga una pausa de 10 a 15 minutos y realice ejercicios oculares.",
+        "BajaFrecuencia": "Parpadee de forma consciente durante 30 segundos.",
+    }
+
+    TITULOS = {
+        "Leve":           "Fatiga leve detectada",
+        "Moderada":       "Fatiga moderada — considerar pausa",
+        "Severa":         "Fatiga severa — pausa inmediata",
+        "BajaFrecuencia": "Frecuencia de parpadeo baja",
+    }
+
+    # Personaje del aviso por nivel (anillo del color del nivel). La baja
+    # frecuencia usa el de leve: la lágrima indica ojo seco / irritación.
+    IMAGENES = {
+        "Normal":         "fatiga_normal.png",
+        "Leve":           "fatiga_leve.png",
+        "Moderada":       "fatiga_moderada.png",
+        "Severa":         "fatiga_severa.png",
+        "BajaFrecuencia": "fatiga_leve.png",
+    }
+
     def disparar(self, clave, nivel_canal, indice, perclos, bpm):
         toast, sonido, modal = self.CANALES.get(nivel_canal, (False, None, False))
         texto, fuente = self.RECOMENDACIONES.get(clave, ("", ""))
-        titulo = {"Leve": "Fatiga leve", "Moderada": "Fatiga moderada",
-                  "Severa": "Fatiga severa",
-                  "BajaFrecuencia": "Frecuencia de parpadeo baja"}.get(clave, "Argos")
+        titulo = self.TITULOS.get(clave, "Argos")
         color = self.COLORES.get(nivel_canal, TemaArgos.ALERTA)
+        imagen = os.path.join(ASSETS_DIR, "alertas", self.IMAGENES.get(clave, ""))
 
         if sonido and self.sonido_activo:
             self.reproducir(sonido)
         if toast and self.toast_activo:
-            self.notificar(titulo, texto, fuente, color)
+            self.notificar(titulo, texto, fuente, color, imagen,
+                           self.ACCIONES.get(clave, texto), nivel_canal, clave)
         if modal and self.modal_activo:
             self.abrir_modal(indice, perclos, bpm, texto, fuente)
 
@@ -2644,37 +4114,62 @@ class GestorAlertas:
         threading.Thread(target=_sonar, daemon=True).start()
 
     # ── Canal 2: notificación del sistema ────────────
-    def notificar(self, titulo, cuerpo, fuente, color):
+    def notificar(self, titulo, cuerpo, fuente, color, imagen=None, cuerpo_corto=None,
+                  nivel=None, clave=None):
         # Siempre mostramos el aviso propio: es el que garantiza que se vea.
         try:
-            ToastArgos(self.ventana, titulo, cuerpo, fuente, color)
+            ToastArgos(self.ventana, titulo, cuerpo, fuente, color, imagen, nivel, clave)
         except Exception:
             pass
         threading.Thread(target=self._toast_windows,
-                         args=(titulo, cuerpo), daemon=True).start()
+                         args=(titulo, cuerpo_corto or cuerpo, imagen, clave or nivel), daemon=True).start()
 
     @staticmethod
-    def _toast_windows(titulo, cuerpo):
+    def _xml_toast(titulo, cuerpo, imagen=None, clave="Leve", recomendacion=True):
+        """XML ToastGeneric. La imagen va como logo circular (appLogoOverride):
+        el personaje del nivel con su anillo de color."""
+        from xml.sax.saxutils import escape, quoteattr
+        texto = lambda t: escape(t.replace("\n", " "))
+        logo = ""
+        if imagen and os.path.isfile(imagen):
+            logo = (f'<image placement="appLogoOverride" hint-crop="circle" '
+                    f'src={quoteattr(pathlib.Path(imagen).resolve().as_uri())}/>')
+        clave = clave if clave in CLAVES_RECOMENDACION else "Leve"
+        uri = quoteattr(f"argos://recomendacion/{clave}")
+        apertura = f'<toast launch={uri} activationType="protocol">' if recomendacion else '<toast>'
+        acciones = (f'<actions><action content="Ver recomendación" arguments={uri} '
+                    'activationType="protocol"/></actions>') if recomendacion else ''
+        return (apertura + '<visual><binding template="ToastGeneric">'
+                f'<text>{texto("ARGOS · " + titulo)}</text>'
+                f'<text>{texto(cuerpo)}</text>{logo}'
+                f'</binding></visual>{acciones}</toast>')
+
+    @staticmethod
+    def _toast_windows(titulo, cuerpo, imagen=None, clave="Leve", recomendacion=True,
+                       tag="argos-fatiga"):
         """Notificación nativa de Windows vía PowerShell. Puede no aparecer si
         el Asistente de concentración está activo; por eso nunca es el único
         canal. Silenciosa ante cualquier fallo."""
-        limpio = lambda t: t.replace("'", " ").replace("\n", " ")
+        xml = GestorAlertas._xml_toast(titulo, cuerpo, imagen, clave, recomendacion).replace("'", "''")
+        tag_ps = tag.replace("'", "''")
         ps = (
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications,"
             " ContentType = WindowsRuntime] | Out-Null; "
-            "$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
-            "[Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
-            "$x = $t.GetElementsByTagName('text'); "
-            f"$x.Item(0).AppendChild($t.CreateTextNode('ARGOS - {limpio(titulo)}')) | Out-Null; "
-            f"$x.Item(1).AppendChild($t.CreateTextNode('{limpio(cuerpo)}')) | Out-Null; "
+            "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument,"
+            " ContentType = WindowsRuntime] | Out-Null; "
+            "$x = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+            f"$x.LoadXml('{xml}'); "
             "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'; "
-            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show("
-            "[Windows.UI.Notifications.ToastNotification]::new($t))"
+            "$toast = [Windows.UI.Notifications.ToastNotification]::new($x); "
+            f"$toast.Tag = '{tag_ps}'; $toast.Group = 'argos'; "
+            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show($toast)"
         )
         try:
-            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                           timeout=12, capture_output=True)
+            r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                               timeout=12, capture_output=True)
+            if r.returncode != 0:
+                print(f"DEBUG toast Windows falló: {r.stderr.decode(errors='replace')[:300]}")
         except Exception:
             pass
 
@@ -2695,9 +4190,12 @@ class GestorAlertas:
     def _al_responder_modal(self, respuesta):
         if respuesta == "posponer":
             self._pospuesto_hasta = time.time() + 300
-        elif respuesta == "pausa":
+        elif respuesta in ("pausa", "recomendacion"):
+            # Ver la recomendación cuenta como tomar la pausa.
             self._pospuesto_hasta = time.time() + 600
         self._modal_abierto = False
+        if respuesta == "recomendacion":
+            VentanaRecomendacion.abrir(self.ventana, "Severa")
 
     # ── Prueba manual (para la defensa) ──────────────
     def probar(self, nivel):
@@ -3336,8 +4834,8 @@ class InterfazFatiga(ctk.CTkFrame):
             return sum(valores) / len(valores) if valores else None
 
         indice = promedio(filas, 7)
-        nivel = ("Sin datos" if indice is None else "Normal" if indice <= 30 else
-                 "Leve" if indice <= 60 else "Moderada" if indice <= 80 else "Severa")
+        nivel = ("Sin datos" if indice is None else "Normal" if indice < 30 else
+                 "Leve" if indice < 60 else "Moderada" if indice < 80 else "Severa")
         tarjetas = [
             ("Total de parpadeos", str(conteos["Normal"] + conteos["Lento"]), "Normales y lentos", tema.TEXTO),
             ("Frecuencia media", "—", "Sin duración de sesiones", tema.TEXTO_TENUE),
@@ -4288,11 +5786,11 @@ class InterfazFatiga(ctk.CTkFrame):
         )
         score = round(max(0.0, min(100.0, score)), 1)
 
-        if score <= 30:
+        if score < 30:
             clasificacion = "Normal"
-        elif score <= 60:
+        elif score < 60:
             clasificacion = "Leve"
-        elif score <= 80:
+        elif score < 80:
             clasificacion = "Moderada"
         else:
             clasificacion = "Severa"
@@ -4615,6 +6113,23 @@ class InterfazFatiga(ctk.CTkFrame):
 # EJECUCIÓN (con depuración)
 # ==========================================
 if __name__ == "__main__":
+    # Activaciones externas se validan antes del splash y se entregan a la
+    # instancia viva con ACK. Si no hay receptor, esperan al primer menú.
+    _pendiente_recomendacion = None
+    for _argumento in sys.argv[1:]:
+        if _argumento.startswith("argos://"):
+            _coincidencia = re.fullmatch(
+                r"argos://recomendacion/(Leve|Moderada|Severa|BajaFrecuencia)/?", _argumento)
+            if _coincidencia:
+                _pendiente_recomendacion = _coincidencia[1]
+                break
+    if _pendiente_recomendacion and enviar_recomendacion(_pendiente_recomendacion):
+        sys.exit(0)
+    registrar_protocolo_argos()
+    escuchar_recomendaciones()
+    if _pendiente_recomendacion:
+        COLA_RECOMENDACIONES.put_nowait(_pendiente_recomendacion)
+
     # La consola de Windows usa cp1252: un print con «→», «·» o acentos lanza
     # UnicodeEncodeError y, si ocurre dentro de un after(), corta el bucle de
     # video. Forzamos UTF-8 tolerante antes de cualquier print.
@@ -4661,7 +6176,7 @@ if __name__ == "__main__":
 
             print(f"DEBUG: Login OK — perfil '{login.perfil_nombre}' ({login.perfil_rol})")
             app = MenuPrincipal(login.perfil_nombre, login.perfil_id, login.perfil_rol, bd)
-            app.protocol("WM_DELETE_WINDOW", app.on_closing)
+            app.protocol("WM_DELETE_WINDOW", app._ocultar_o_cerrar)
             print("DEBUG: Entrando en mainloop...")
             app.mainloop()
             print("DEBUG: mainloop finalizado.")
