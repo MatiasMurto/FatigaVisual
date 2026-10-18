@@ -256,25 +256,39 @@ class GestorAutenticacionWindows:
     # ── Windows Hello (PIN / huella / rostro) ────────
     # UserConsentVerifier solo puede verificar al usuario de la SESIÓN actual
     # de Windows; los demás perfiles de la app usan PIN propio hasheado.
+    # Las operaciones de winrt 3.x son awaitables pero NO corrutinas, y
+    # asyncio.run() solo acepta corrutinas: hay que envolverlas en un async def.
+    @staticmethod
+    def _esperar_winrt(operacion, timeout=None):
+        async def _corrutina():
+            return await asyncio.wait_for(operacion, timeout=timeout)
+        return asyncio.run(_corrutina())
+
     @staticmethod
     def hello_disponible():
         if not HELLO_IMPORTADO:
+            print("DEBUG: Windows Hello: no se pudo importar winrt.")
             return False
         try:
-            avail = asyncio.run(winrt_ui.UserConsentVerifier.check_availability_async())
+            avail = GestorAutenticacionWindows._esperar_winrt(
+                winrt_ui.UserConsentVerifier.check_availability_async(), timeout=10)
+            print(f"DEBUG: Windows Hello disponibilidad = {avail}")
             return int(avail) == 0  # 0 = Available
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: Windows Hello no disponible: {type(e).__name__}: {e}")
             return False
 
     @staticmethod
     def verificar_hello(mensaje="Confirmá tu identidad"):
         """Muestra el diálogo nativo de Windows Hello. True solo si Verified."""
         try:
-            resultado = asyncio.run(asyncio.wait_for(
+            resultado = GestorAutenticacionWindows._esperar_winrt(
                 winrt_ui.UserConsentVerifier.request_verification_async(mensaje),
-                timeout=120))
+                timeout=120)
+            print(f"DEBUG: Windows Hello resultado = {resultado}")
             return int(resultado) == 0  # 0 = Verified
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: Windows Hello falló: {type(e).__name__}: {e}")
             return False
 
     # ── Fallbacks cuando no hay Windows Hello ────────
@@ -308,6 +322,95 @@ class GestorAutenticacionWindows:
                 return True
             except win32security.error:
                 continue
+        return False
+
+    # ── Diálogo nativo "Seguridad de Windows" (credui.dll) ────────
+    # Funciona sin Windows Hello y tanto para cuentas locales como Microsoft:
+    # Windows muestra su propio cuadro con la tarjeta del usuario de la sesión,
+    # y la contraseña se valida con LogonUser contra ese mismo usuario (SID).
+    @staticmethod
+    def pedir_password_windows(mensaje, hwnd_padre=None):
+        """Muestra el cuadro de credenciales de Windows y valida la contraseña.
+        Devuelve True (correcta y del usuario de la sesión), False (incorrecta
+        o de otra cuenta) o None (cancelado). Lanza OSError si el cuadro no
+        se pudo mostrar, para que el login caiga al PIN de app."""
+        from ctypes import wintypes
+
+        class CREDUI_INFOW(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD),
+                        ("hwndParent", wintypes.HWND),
+                        ("pszMessageText", wintypes.LPCWSTR),
+                        ("pszCaptionText", wintypes.LPCWSTR),
+                        ("hbmBanner", wintypes.HBITMAP)]
+
+        CREDUIWIN_ENUMERATE_CURRENT_USER = 0x200
+        ERROR_CANCELLED = 1223
+
+        credui = ctypes.WinDLL("credui", use_last_error=True)
+        ole32  = ctypes.WinDLL("ole32")
+
+        info = CREDUI_INFOW(ctypes.sizeof(CREDUI_INFOW), hwnd_padre,
+                            mensaje, "ARGOS - Seguridad de Windows", None)
+        paquete  = wintypes.ULONG(0)
+        buf_out  = ctypes.c_void_p()
+        tam_out  = wintypes.ULONG(0)
+        guardar  = wintypes.BOOL(False)
+        rc = credui.CredUIPromptForWindowsCredentialsW(
+            ctypes.byref(info), 0, ctypes.byref(paquete), None, 0,
+            ctypes.byref(buf_out), ctypes.byref(tam_out), ctypes.byref(guardar),
+            CREDUIWIN_ENUMERATE_CURRENT_USER)
+        if rc == ERROR_CANCELLED:
+            return None
+        if rc != 0:
+            raise OSError(f"CredUIPromptForWindowsCredentials error {rc}")
+
+        try:
+            n_usr, n_dom, n_pwd = wintypes.DWORD(256), wintypes.DWORD(256), wintypes.DWORD(256)
+            usr = ctypes.create_unicode_buffer(256)
+            dom = ctypes.create_unicode_buffer(256)
+            pwd = ctypes.create_unicode_buffer(256)
+            ok = credui.CredUnPackAuthenticationBufferW(
+                0, buf_out, tam_out, usr, ctypes.byref(n_usr),
+                dom, ctypes.byref(n_dom), pwd, ctypes.byref(n_pwd))
+            if not ok:
+                raise OSError(f"CredUnPackAuthenticationBuffer error {ctypes.get_last_error()}")
+            usuario, dominio, password = usr.value, dom.value, pwd.value
+        finally:
+            ctypes.memset(buf_out, 0, tam_out.value)
+            ole32.CoTaskMemFree(buf_out)
+            ctypes.memset(pwd, 0, ctypes.sizeof(pwd))
+
+        # El usuario puede venir como "DOMINIO\usuario"
+        if not dominio and "\\" in usuario:
+            dominio, usuario = usuario.split("\\", 1)
+        return GestorAutenticacionWindows._password_es_del_usuario_actual(
+            usuario, dominio, password)
+
+    @staticmethod
+    def _password_es_del_usuario_actual(usuario, dominio, password):
+        """LogonUser con varias formas de dominio (local, equipo, MicrosoftAccount,
+        UPN) y compara el SID del token con el del usuario de la sesión."""
+        sid_actual = win32security.GetTokenInformation(
+            win32security.OpenProcessToken(win32api.GetCurrentProcess(),
+                                           win32security.TOKEN_QUERY),
+            win32security.TokenUser)[0]
+        candidatos = []
+        for d in (dominio, ".", win32api.GetComputerName(), "MicrosoftAccount", None):
+            if (d, usuario) not in candidatos:
+                candidatos.append((d, usuario))
+        for d, u in candidatos:
+            try:
+                token = win32security.LogonUser(
+                    u, d, password,
+                    win32security.LOGON32_LOGON_INTERACTIVE,
+                    win32security.LOGON32_PROVIDER_DEFAULT)
+            except win32security.error:
+                continue
+            try:
+                sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+                return sid == sid_actual
+            finally:
+                token.Close()
         return False
 
 
@@ -602,13 +705,356 @@ class CalculadorEAR:
         return [(int(landmarks[i].x * w), int(landmarks[i].y * h)) for i in indices]
 
     @classmethod
+    def obtener_coordenadas_3d(cls, indices, landmarks, w, h):
+        """(x·w, y·h, z·w): la z de MediaPipe está en la escala del ancho, igual
+        que x. Con la profundidad, el ojo lejano de una cabeza girada deja de
+        verse escorzado y su EAR no se infla."""
+        return [(landmarks[i].x * w, landmarks[i].y * h, landmarks[i].z * w) for i in indices]
+
+    @classmethod
     def calcular_ear_ojo(cls, puntos):
+        # math.dist acepta 2D o 3D: sirve para ambos tipos de coordenadas.
         v1 = cls.distancia_euclidiana(puntos[1], puntos[5])
         v2 = cls.distancia_euclidiana(puntos[2], puntos[4])
         h  = cls.distancia_euclidiana(puntos[0], puntos[3])
         if h == 0:
             return 0.0
         return (v1 + v2) / (2.0 * h)
+
+    @staticmethod
+    def pose_desde_matriz(matriz):
+        """(pitch, yaw, roll) en grados desde la matriz de transformación 4×4
+        de FaceLandmarker (su 3×3 superior izquierda es la rotación).
+        Pitch positivo = cabeza hacia abajo."""
+        r = matriz
+        pitch = math.degrees(math.atan2(r[2][1], r[2][2]))
+        yaw   = math.degrees(math.atan2(-r[2][0], math.hypot(r[0][0], r[1][0])))
+        roll  = math.degrees(math.atan2(r[1][0], r[0][0]))
+        return pitch, yaw, roll
+
+
+# ==========================================
+# 2.3 DETECTOR DE PARPADEO (sin interfaz)
+# ==========================================
+class DetectorParpadeo:
+    """Máquina de estados del parpadeo, separada de la interfaz para poder
+    probarla reproduciendo videos grabados. Por cuadro recibe el EAR de cada
+    ojo, la pose de la cabeza y el movimiento de la nariz; devuelve el estado
+    del cuadro y, si terminó un cierre, el evento clasificado.
+
+    - Baseline móvil: percentil 90 de los últimos 10 s con ojo abierto y
+      evaluable (sube y baja con la postura y la luz), uno por ojo y otro del
+      promedio.
+    - Cierre por caída relativa desde el pico, no por umbrales fijos: así los
+      parpadeos rápidos seguidos no se fusionan en un solo cierre largo.
+    - Duración medida a media amplitud entre pico y valle.
+    - Mirar hacia abajo o estar de perfil = "no evaluable": no cuenta
+      parpadeos ni suma al PERCLOS."""
+
+    CALIB_S             = 1.5
+    VENTANA_BASELINE_S  = 10.0
+    K_INICIO            = 0.70   # inicio de cierre: EAR < baseline·K_INICIO ...
+    K_CAIDA             = 0.25   # ... y pico − EAR ≥ baseline·K_CAIDA
+    K_REAPERTURA_REL    = 0.25   # reapertura: EAR ≥ valle + baseline·K_REAPERTURA_REL
+    K_REAPERTURA_ABS    = 0.85   # ... o EAR ≥ baseline·K_REAPERTURA_ABS
+    MOVIMIENTO_MAX_PX   = 18     # nariz entre cuadros: más que esto no inicia cierre
+    HUECO_MAX_S         = 0.5    # cámara trabada: cancela el cierre en curso
+    GUINO_CERRADO       = 0.45   # un ojo cerró > 45 % de su baseline ...
+    GUINO_ABIERTO       = 0.15   # ... y el otro < 15 % → guiño
+    PROF_RUIDO          = 0.40
+    PROF_ENTRECERRADO   = 0.60
+    ENTRECERRADO_MIN_MS = 500
+    NORMAL_MAX_MS       = 300
+    LENTO_MAX_MS        = 500
+    PROLONGADO_MAX_MS   = 2000
+    CIERRE_LARGO_MS     = 15000  # se registra en vivo, sin esperar la reapertura
+    PITCH_ABAJO         = 8.0    # grados sobre la referencia
+    PITCH_CAIDA_CIERRE  = 5.0    # la cabeza bajó durante el cierre → no evaluable
+    YAW_PERFIL          = 55.0
+    PITCH_REF_PESO      = 0.01
+    PITCH_REF_TOL       = 3.0
+    K_OJO_BIEN_ABIERTO  = 0.90
+
+    def __init__(self):
+        self.reiniciar()
+
+    def reiniciar(self, conservar_baseline=False):
+        """Vuelve a cero. Con conservar_baseline=True (y ya calibrado) mantiene
+        la referencia de ojo abierto y de pitch: la usa iniciar detección para
+        no pisar una auto-calibración manual."""
+        if not (conservar_baseline and getattr(self, "calibrado", False)):
+            self.calibrado    = False
+            self.baseline     = None
+            self.baseline_izq = None
+            self.baseline_der = None
+            self.pitch_ref    = None
+        self._calib_t0      = None
+        self._calib         = []          # (ear, izq, der, pitch)
+        self._ventana       = deque()     # (t, ear, izq, der) abierto y evaluable
+        self.cerrado        = False
+        self._pico          = None
+        self._pitch_pico    = None
+        self._cierre_t0     = None
+        self._valle         = None
+        self._muestras      = []          # (t, ear, izq, der) del cierre en curso
+        self._largo_registrado = False
+        self._t_prev        = None
+        self._dts           = deque(maxlen=30)
+        self.no_evaluable_s = 0.0
+
+    def sembrar_baseline(self, ear_abierto, pitch=None):
+        """Baseline inicial desde la auto-calibración manual (ojos abiertos)."""
+        self.reiniciar()
+        self.baseline = self.baseline_izq = self.baseline_der = ear_abierto
+        self.pitch_ref = pitch
+        self.calibrado = True
+        print(f"DEBUG baseline sembrado por auto-calibración: {ear_abierto:.3f}")
+
+    @property
+    def periodo(self):
+        """Período de cuadro típico (s); 1/15 hasta tener datos."""
+        return statistics.median(self._dts) if self._dts else 1 / 15
+
+    @staticmethod
+    def _percentil(valores, p):
+        orden = sorted(valores)
+        return orden[min(len(orden) - 1, int(len(orden) * p))]
+
+    def _resultado(self, estado, evaluable=True, cerrado=None, evento=None):
+        return {"estado": estado, "evaluable": evaluable,
+                "cerrado": cerrado, "evento": evento}
+
+    def _cancelar_cierre(self):
+        self.cerrado    = False
+        self._cierre_t0 = None
+        self._valle     = None
+        self._muestras  = []
+        self._largo_registrado = False
+        self._pico      = None
+
+    def _avanzar_tiempo(self, t):
+        dt = (t - self._t_prev) if self._t_prev is not None else 0.0
+        self._t_prev = t
+        if 0 < dt <= self.HUECO_MAX_S:
+            self._dts.append(dt)
+        return dt
+
+    def sin_rostro(self, t):
+        """Cuadro sin cara detectada: no evaluable."""
+        dt = self._avanzar_tiempo(t)
+        self._cancelar_cierre()
+        self.no_evaluable_s += min(dt, self.HUECO_MAX_S)
+        return self._resultado("sin rostro", evaluable=False)
+
+    def procesar(self, t, ear_izq, ear_der, pitch=None, yaw=None, movimiento=0.0):
+        ear = (ear_izq + ear_der) / 2.0
+        dt  = self._avanzar_tiempo(t)
+
+        # ── Calibración inicial ──
+        if not self.calibrado:
+            if self._calib_t0 is None:
+                self._calib_t0 = t
+            self._calib.append((ear, ear_izq, ear_der, pitch))
+            if t - self._calib_t0 >= self.CALIB_S:
+                self.baseline     = self._percentil([m[0] for m in self._calib], 0.90)
+                self.baseline_izq = self._percentil([m[1] for m in self._calib], 0.90)
+                self.baseline_der = self._percentil([m[2] for m in self._calib], 0.90)
+                pitches = [m[3] for m in self._calib if m[3] is not None]
+                self.pitch_ref = self._percentil(pitches, 0.25) if pitches else None
+                self.calibrado = True
+                self._calib = []
+                print(f"DEBUG baseline calibrado: {self.baseline:.3f} "
+                      f"(izq {self.baseline_izq:.3f}, der {self.baseline_der:.3f}, "
+                      f"pitch ref {self.pitch_ref if self.pitch_ref is None else round(self.pitch_ref, 1)})")
+            return self._resultado("Calibrando... (mantené ojos abiertos)", evaluable=False)
+
+        B = self.baseline
+
+        # ── Estados no evaluables ──
+        no_eval = None
+        if yaw is not None and abs(yaw) > self.YAW_PERFIL:
+            no_eval = "Perfil (no evaluable)"
+        elif (pitch is not None and self.pitch_ref is not None
+              and pitch - self.pitch_ref > self.PITCH_ABAJO and ear < B * self.K_INICIO):
+            no_eval = "Mirando abajo (no evaluable)"
+        elif (self.cerrado and pitch is not None and self._pitch_pico is not None
+              and pitch - self._pitch_pico > self.PITCH_CAIDA_CIERRE):
+            no_eval = "Mirando abajo (no evaluable)"
+        if no_eval:
+            self._cancelar_cierre()
+            self.no_evaluable_s += min(dt, self.HUECO_MAX_S)
+            return self._resultado(no_eval, evaluable=False)
+
+        if dt > self.HUECO_MAX_S and self.cerrado:
+            self._cancelar_cierre()      # cámara trabada: el cierre no es medible
+
+        # ── Ojo abierto: buscar inicio de cierre ──
+        if not self.cerrado:
+            if self._pico is None or ear > self._pico:
+                self._pico, self._pitch_pico = ear, pitch
+            if (ear < B * self.K_INICIO and self._pico - ear >= B * self.K_CAIDA
+                    and movimiento <= self.MOVIMIENTO_MAX_PX):
+                self.cerrado    = True
+                self._cierre_t0 = t
+                self._valle     = ear
+                self._muestras  = [(t, ear, ear_izq, ear_der)]
+                self._largo_registrado = False
+                return self._resultado("Cerrando...", cerrado=True)
+            self._actualizar_baseline(t, ear, ear_izq, ear_der, pitch)
+            estado = ("Moviendo cabeza (ignorado)" if movimiento > self.MOVIMIENTO_MAX_PX
+                      else "Abierto")
+            return self._resultado(estado, cerrado=False)
+
+        # ── Ojo cerrado: seguir el valle y esperar la reapertura ──
+        self._muestras.append((t, ear, ear_izq, ear_der))
+        self._valle = min(self._valle, ear)
+        if ear >= self._valle + B * self.K_REAPERTURA_REL or ear >= B * self.K_REAPERTURA_ABS:
+            evento = None if self._largo_registrado else self._clasificar()
+            self._cancelar_cierre()
+            self._pico, self._pitch_pico = ear, pitch
+            return self._resultado("Abierto", cerrado=False, evento=evento)
+
+        if (not self._largo_registrado
+                and (t - self._cierre_t0) * 1000 > self.CIERRE_LARGO_MS):
+            self._largo_registrado = True
+            evento = {"duracion_ms": (t - self._cierre_t0) * 1000,
+                      "etiqueta": "Cierre-largo", "categoria": "prolongado",
+                      "profundidad": 1 - self._valle / B}
+            return self._resultado("Cierre largo", cerrado=True, evento=evento)
+        return self._resultado("Cerrado...", cerrado=True)
+
+    def _actualizar_baseline(self, t, ear, izq, der, pitch):
+        self._ventana.append((t, ear, izq, der))
+        while self._ventana and t - self._ventana[0][0] > self.VENTANA_BASELINE_S:
+            self._ventana.popleft()
+        if len(self._ventana) >= 5:
+            self.baseline     = self._percentil([m[1] for m in self._ventana], 0.90)
+            self.baseline_izq = self._percentil([m[2] for m in self._ventana], 0.90)
+            self.baseline_der = self._percentil([m[3] for m in self._ventana], 0.90)
+        # Referencia de pitch: muy lenta, solo con ojo bien abierto y cabeza en
+        # su postura habitual, para que mirar abajo un rato no la arrastre.
+        if (pitch is not None and self.pitch_ref is not None
+                and ear >= self.K_OJO_BIEN_ABIERTO * self.baseline
+                and abs(pitch - self.pitch_ref) < self.PITCH_REF_TOL):
+            self.pitch_ref += self.PITCH_REF_PESO * (pitch - self.pitch_ref)
+
+    def _clasificar(self):
+        """Evento del cierre que acaba de terminar: duración a media amplitud,
+        profundidad y etiqueta."""
+        B = self.baseline
+        medio = (self._pico + self._valle) / 2.0
+        bajo  = [m[0] for m in self._muestras if m[1] < medio]
+        if bajo:
+            duracion_ms = (bajo[-1] - bajo[0] + self.periodo) * 1000
+        else:
+            duracion_ms = self.periodo * 1000
+        profundidad = 1 - self._valle / B
+
+        guino = False
+        if self.baseline_izq and self.baseline_der:
+            for _, _, izq, der in self._muestras:
+                c_izq = 1 - izq / self.baseline_izq
+                c_der = 1 - der / self.baseline_der
+                if ((c_izq > self.GUINO_CERRADO and c_der < self.GUINO_ABIERTO)
+                        or (c_der > self.GUINO_CERRADO and c_izq < self.GUINO_ABIERTO)):
+                    guino = True
+                    break
+
+        if guino:
+            etiqueta, categoria = "Falso-guiño", "falso"
+        elif profundidad < self.PROF_RUIDO:
+            etiqueta, categoria = "Falso-ruido", "falso"
+        elif duracion_ms > self.ENTRECERRADO_MIN_MS and profundidad < self.PROF_ENTRECERRADO:
+            etiqueta, categoria = "Entrecerrado", "falso"
+        elif duracion_ms <= self.NORMAL_MAX_MS:
+            etiqueta, categoria = "Normal", "parpadeo"
+        elif duracion_ms <= self.LENTO_MAX_MS:
+            etiqueta, categoria = "Lento", "parpadeo"
+        elif duracion_ms <= self.PROLONGADO_MAX_MS:
+            etiqueta, categoria = "Prolongado", "prolongado"
+        else:
+            etiqueta, categoria = "Microsueño", "prolongado"
+        return {"duracion_ms": duracion_ms, "etiqueta": etiqueta,
+                "categoria": categoria, "profundidad": profundidad}
+
+# ==========================================
+# 2.4 REGISTRO DE DEPURACIÓN DE LA SEÑAL EAR
+# ==========================================
+class EARDebugLogger:
+    """Graba, por escenario de prueba, la señal cuadro a cuadro (CSV), el video
+    crudo de la webcam (.mp4, sin landmarks), capturas con landmarks cada
+    CAPTURA_CADA_S segundos y un resumen con el FPS promedio.
+    Se activa solo con la variable de entorno ARGOS_DEBUG=<letra de escenario>."""
+
+    COLUMNAS = ["cuadro", "t_s", "rostro", "ear_izq", "ear_der", "ear_usado",
+                "ear_suavizado", "baseline", "umbral_cerrar", "umbral_abrir",
+                "ojo_cerrado", "estado", "parpadeos", "giro_cabeza",
+                "pitch", "yaw", "no_evaluable_s", "movimiento_px", "fps"]
+    CAPTURA_CADA_S = 10.0
+
+    def __init__(self, escenario, carpeta, fps_video=30.0, tam_video=(640, 480)):
+        import csv
+        os.makedirs(carpeta, exist_ok=True)
+        sello = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.base = os.path.join(carpeta, f"{escenario}_{sello}")
+        self.escenario = escenario
+        self._f   = open(self.base + ".csv", "w", newline="", encoding="utf-8")
+        self._csv = csv.writer(self._f)
+        self._csv.writerow(self.COLUMNAS)
+        self._video = cv2.VideoWriter(self.base + ".mp4",
+                                      cv2.VideoWriter_fourcc(*"mp4v"),
+                                      fps_video, tam_video)
+        self._tam_video  = tam_video
+        self._t0         = time.time()
+        self._n          = 0
+        self._fps_suma   = 0.0
+        self._fps_n      = 0
+        self._ult_captura = None
+        self._n_capturas = 0
+        self._parpadeos  = 0
+        print(f"DEBUG: EARDebugLogger grabando escenario {escenario} en {self.base}.*")
+
+    def grabar_cuadro_crudo(self, frame):
+        if frame.shape[1::-1] != self._tam_video:
+            frame = cv2.resize(frame, self._tam_video)
+        self._video.write(frame)
+
+    def capturar_si_toca(self, frame_anotado):
+        t = time.time() - self._t0
+        if self._ult_captura is None or t - self._ult_captura >= self.CAPTURA_CADA_S:
+            self._ult_captura = t
+            self._n_capturas += 1
+            cv2.imwrite(f"{self.base}_captura{self._n_capturas}.png", frame_anotado)
+
+    def log(self, **valores):
+        self._n += 1
+        fila = {"cuadro": self._n, "t_s": round(time.time() - self._t0, 4)}
+        fila.update(valores)
+        fps = fila.get("fps") or 0.0
+        if fps > 0:
+            self._fps_suma += fps
+            self._fps_n    += 1
+        self._parpadeos = fila.get("parpadeos", self._parpadeos)
+        fmt = lambda v: f"{v:.5f}" if isinstance(v, float) else ("" if v is None else v)
+        self._csv.writerow([fmt(fila.get(c)) for c in self.COLUMNAS])
+
+    def close(self):
+        if self._f is None:
+            return
+        dur = time.time() - self._t0
+        fps_prom = self._fps_suma / self._fps_n if self._fps_n else 0.0
+        self._f.close()
+        self._f = None
+        self._video.release()
+        with open(self.base + "_resumen.txt", "w", encoding="utf-8") as r:
+            r.write(f"Escenario: {self.escenario}\n"
+                    f"Duración: {dur:.1f} s\n"
+                    f"Cuadros: {self._n}\n"
+                    f"FPS promedio (sistema): {fps_prom:.1f}\n"
+                    f"Parpadeos marcados por el sistema: {self._parpadeos}\n"
+                    f"Capturas: {self._n_capturas}\n")
+        print(f"DEBUG: EARDebugLogger cerrado ({dur:.1f} s, {fps_prom:.1f} FPS prom.)")
+
 
 # ==========================================
 # 2.5 PANTALLA DE CARGA (splash con ojo que parpadeaba, ahora ya no jeje)
@@ -1090,8 +1536,9 @@ class VentanaLogin(ctk.CTkToplevel):
         if tipo == "windows":
             # Cadena de verificación de la cuenta de Windows:
             #   1) Windows Hello (PIN/huella/cara)   — si está configurado
-            #   2) contraseña de Windows (LogonUser) — cuenta local sin Hello
-            #   3) PIN de app (PBKDF2)               — cuenta Microsoft sin Hello
+            #   2) cuadro nativo "Seguridad de Windows" con la contraseña de
+            #      la cuenta (local o Microsoft), validada con LogonUser
+            #   3) PIN de app (PBKDF2)               — si el cuadro nativo falla
             if self.hello_disponible:
                 # En un hilo aparte: asyncio.run() dentro del callback de Tk
                 # congelaba el mainloop (y el diálogo de Hello no tomaba foco).
@@ -1105,12 +1552,21 @@ class VentanaLogin(ctk.CTkToplevel):
                     daemon=True).start()
                 self._esperar_hello(uid, nombre, rol)
                 return
-            elif not GestorAutenticacionWindows.es_cuenta_microsoft(nombre):
-                pwd = self._pedir_secreto("Contraseña de Windows",
-                                          f"Contraseña de Windows de {nombre}:")
-                if pwd is None:
-                    return
-                if not GestorAutenticacionWindows.validar_password_local(nombre, pwd):
+            try:
+                hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+                resultado = GestorAutenticacionWindows.pedir_password_windows(
+                    f"Ingresá la contraseña de Windows para entrar como {nombre}.",
+                    hwnd)
+                cuadro_nativo_ok = True
+            except Exception as e:
+                print(f"DEBUG: cuadro nativo de Windows falló: {type(e).__name__}: {e}")
+                resultado, cuadro_nativo_ok = None, False
+            self.grab_set()  # recuperar el foco modal del login
+
+            if cuadro_nativo_ok:
+                if resultado is None:
+                    return  # cancelado
+                if not resultado:
                     self.label_error.configure(text="Contraseña de Windows incorrecta.")
                     return
             else:
@@ -1638,12 +2094,14 @@ class ToastArgos(ctk.CTkToplevel):
 class DialogoPausa(ctk.CTkToplevel):
     """Modal bloqueante. Solo para fatiga severa: exige una respuesta."""
 
-    def __init__(self, parent, indice, perclos, bpm, recomendacion, fuente):
+    def __init__(self, parent, indice, perclos, bpm, recomendacion, fuente,
+                 al_responder=None):
         super().__init__(parent)
         self.configure(fg_color=TemaArgos.PANEL)
         self.title("Argos — Fatiga severa")
         self.resizable(False, False)
         self.respuesta = None
+        self._al_responder = al_responder  # se llama con la respuesta tras cerrar
 
         w, h = 520, 400
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
@@ -1710,6 +2168,8 @@ class DialogoPausa(ctk.CTkToplevel):
         except Exception:
             pass
         self.destroy()
+        if self._al_responder:
+            self._al_responder(valor)
 
 
 class GestorAlertas:
@@ -1909,17 +2369,21 @@ class GestorAlertas:
         if self._modal_abierto:
             return
         self._modal_abierto = True
+        # Sin wait_window: esperar acá frenaba la cadena after() del bucle de
+        # video (la app quedaba congelada mientras el modal estaba abierto).
+        # La respuesta llega por callback cuando el usuario cierra el diálogo.
         try:
-            dlg = DialogoPausa(self.ventana, indice, perclos, bpm, texto, fuente)
-            self.ventana.wait_window(dlg)
-            if dlg.respuesta == "posponer":
-                self._pospuesto_hasta = time.time() + 300
-            elif dlg.respuesta == "pausa":
-                self._pospuesto_hasta = time.time() + 600
+            DialogoPausa(self.ventana, indice, perclos, bpm, texto, fuente,
+                         al_responder=self._al_responder_modal)
         except Exception:
-            pass
-        finally:
             self._modal_abierto = False
+
+    def _al_responder_modal(self, respuesta):
+        if respuesta == "posponer":
+            self._pospuesto_hasta = time.time() + 300
+        elif respuesta == "pausa":
+            self._pospuesto_hasta = time.time() + 600
+        self._modal_abierto = False
 
     # ── Prueba manual (para la defensa) ──────────────
     def probar(self, nivel):
@@ -1965,7 +2429,6 @@ class InterfazFatiga(ctk.CTkFrame):
         self._al_volver = al_volver
 
         # Estado detección
-        self.cierre_inicio     = None  # timestamp real de inicio de cierre de ojos (None = ojos abiertos)
         self.FPS_REFERENCIA    = 30.0  # referencia para interpretar p_frames_cons/p_frames_max como segundos
         self.total_parpadeos   = 0
         self.historial_tiempos = []
@@ -1993,47 +2456,30 @@ class InterfazFatiga(ctk.CTkFrame):
         self.CALIB_DURACION        = 3.0
         self.CALIB_DURACION_IMAGEN = 1.5
 
-        # Baseline de ojo abierto (EAR de referencia). Se fija por calibración
-        # implícita al iniciar la detección o por la auto-calibración manual.
-        self._baseline_abierto = None
-
         # Anti-falsos-positivos
         self.cooldown_hasta    = 0.0  # timestamp real hasta el que se ignoran nuevos cierres
         self.p_frames_max      = 15
         self.p_cooldown        = 4    # "cuadros" @ FPS_REFERENCIA (~0.13 s) — evita doble conteo por temblor del párpado al reabrir
         self.umbral_movimiento = 18  # px entre cuadros (nariz) para descartar giro de cabeza
 
-        # Máquina de estados de parpadeo (histéresis + clasificación por duración)
-        # Umbrales de clasificación temporal en ms (estándar de literatura EAR/PERCLOS).
-        self.ojo_cerrado          = False  # estado persistente para aplicar histéresis
-        self.cierre_fin           = None   # último instante con EAR bajo umbral_cerrar (fase profunda)
-        self.asimetria_max_cierre = 0.0    # máx |ear_izq-ear_der| observado durante el cierre en curso
-        # Umbrales relativos al baseline de ojo abierto (histéresis: cerrar < abrir).
-        self.K_CERRAR             = 0.72   # umbral_cerrar = baseline * K_CERRAR
-        self.K_ABRIR              = 0.82   # umbral_abrir  = baseline * K_ABRIR (banda muerta anti-chattering)
-        self.ASIMETRIA_MAX        = 0.08   # asimetría mayor durante el cierre = un solo ojo (reflejo) → falso
-        self.RUIDO_MIN_MS         = 70     # cierre más corto que esto = ruido, no parpadeo humano real
-        self.NORMAL_MAX_MS        = 300    # 70-300 ms  → parpadeo normal
-        self.LENTO_MAX_MS         = 500    # 300-500 ms → parpadeo lento
-        self.PROLONGADO_MAX_MS    = 2000   # 500-2000 ms → prolongado; > 2000 ms → microsueño
-        self.EMERGENCIA_MS        = 15000  # red de seguridad para tracking perdido real (con baseline estable, un cierre largo genuino se deja correr completo)
+        # Máquina de estados del parpadeo (baseline móvil, cierre por caída
+        # relativa, clasificación y estados no evaluables): vive aparte para
+        # poder probarla reproduciendo videos sin la interfaz.
+        self.detector             = DetectorParpadeo()
         self.total_prolongados    = 0
         self.total_falsos         = 0
+        self._ultimo_pitch        = None  # para sembrar la referencia de la auto-calibración
 
-        # Baseline de ojo abierto: EAR típico con ojos abiertos del que cuelga el
-        # umbral. Se fija en los primeros BASELINE_CALIB_S segundos (calibración
-        # implícita) y luego se adapta MUY lento y SOLO con ojo abierto confiable,
-        # así nunca se contamina con cierres (era la causa del umbral inestable).
-        self.baseline_calibrado    = False
-        self.baseline_calib_inicio = None
-        self.baseline_muestras     = []
-        self.BASELINE_CALIB_S      = 2.0   # segundos iniciales para fijar el baseline
-        self.BASELINE_EMA          = 0.02  # peso de adaptación lenta en operación
+        # Calentamiento: PERCLOS y frecuencia usan ventanas de 60 s; antes de
+        # completarlas la frecuencia da ~0/min y dispararía alertas falsas.
+        self.CALENTAMIENTO_S      = 60.0
+        self.deteccion_inicio     = None
 
         # FPS real (diagnóstico: resolución temporal de la medición de duración)
         self._fps    = 0.0
         self._fps_n  = 0
         self._fps_t0 = None
+        self.debug_logger = None  # EARDebugLogger, solo con ARGOS_DEBUG=<escenario>
 
         # Prueba guiada de validación
         self.guia_activa      = False
@@ -2093,10 +2539,14 @@ class InterfazFatiga(ctk.CTkFrame):
             num_faces=1,
             min_face_detection_confidence=0.7,
             min_face_presence_confidence=0.7,
-            min_tracking_confidence=0.6
+            min_tracking_confidence=0.6,
+            output_facial_transformation_matrixes=True  # pose de cabeza (pitch/yaw)
         )
         self.face_landmarker = mp_vision.FaceLandmarker.create_from_options(options)
-        self.timestamp_ms    = 0
+        # Timestamps reales (ms desde que se creó el modelo), siempre crecientes:
+        # sumar 33 ms fijos con la cámara a ~15 FPS desajustaba el seguimiento.
+        self._mp_t0          = time.time()
+        self.timestamp_ms    = -1
         print("DEBUG: FaceLandmarker creado.")
 
     # ── Construcción UI ──────────────────────────────
@@ -2799,11 +3249,11 @@ class InterfazFatiga(ctk.CTkFrame):
                 self._set_slider("sl_umbral", umbral)
                 self._set_slider("sl_frames_max", frames_max)
 
-                # La calibración manual siembra directamente el baseline de ojo
-                # abierto (equivale y reemplaza a la calibración implícita inicial).
+                # La calibración manual siembra el baseline inicial de ojo abierto
+                # (reemplaza a la calibración implícita); después lo ajusta la
+                # ventana móvil del detector.
                 if self.calib_ear_open:
-                    self._baseline_abierto  = self.calib_ear_open
-                    self.baseline_calibrado = True
+                    self.detector.sembrar_baseline(self.calib_ear_open, self._ultimo_pitch)
                     self._aplicar_umbral_desde_baseline()
 
                 self.calib_fase = 4
@@ -2836,10 +3286,7 @@ class InterfazFatiga(ctk.CTkFrame):
         self.sl_contraste.set(self.p_contraste)
         self.sl_clahe.set(self.p_clahe)
         # Forzar re-calibración del baseline de ojo abierto
-        self._baseline_abierto     = None
-        self.baseline_calibrado    = False
-        self.baseline_calib_inicio = None
-        self.baseline_muestras     = []
+        self.detector.reiniciar()
 
     # ── Usuarios ─────────────────────────────────────
     def _abrir_gestion_usuarios(self):
@@ -2864,17 +3311,15 @@ class InterfazFatiga(ctk.CTkFrame):
             self._ultimo_ts_perclos = None
             self.duraciones_parpadeo.clear()
             self.prolongados_recientes.clear()
-            self.ojo_cerrado          = False
-            self.asimetria_max_cierre = 0.0
-            self.cierre_inicio        = None
-            self.cierre_fin           = None
             self.cooldown_hasta       = 0.0
+            self.deteccion_inicio     = time.time()
             self._fps = 0.0; self._fps_n = 0; self._fps_t0 = None
+            escenario = os.environ.get("ARGOS_DEBUG", "").strip()
+            if escenario:
+                self.debug_logger = EARDebugLogger(
+                    escenario, os.path.join(_dir_datos(), "debug_argos"))
             # Re-calibrar baseline al iniciar (salvo que ya venga de auto-calibración)
-            if not self.baseline_calibrado:
-                self._baseline_abierto     = None
-                self.baseline_calib_inicio = None
-                self.baseline_muestras     = []
+            self.detector.reiniciar(conservar_baseline=True)
             self.btn_iniciar.configure(text="Detener Detección",
                                         fg_color=TemaArgos.RIESGO,
                                         hover_color="#8F332C")
@@ -2891,7 +3336,13 @@ class InterfazFatiga(ctk.CTkFrame):
                                         text_color=TemaArgos.TEXTO_TENUE)
             if self.cap:
                 self.cap.release()
+            self._cerrar_debug_logger()
             self.label_video.configure(image=None, text="")
+
+    def _cerrar_debug_logger(self):
+        if self.debug_logger:
+            self.debug_logger.close()
+            self.debug_logger = None
 
     def toggle_camara(self):
         """Muestra u oculta el video (el widget vive siempre en la vista
@@ -2933,10 +3384,7 @@ class InterfazFatiga(ctk.CTkFrame):
         if not self.camara_visible:
             self.toggle_camara()           # asegura que se vea la guía
         # Recalibrar baseline desde cero (la fase 0 de la guía lo calibra)
-        self._baseline_abierto     = None
-        self.baseline_calibrado    = False
-        self.baseline_calib_inicio = None
-        self.baseline_muestras     = []
+        self.detector.reiniciar()
         # Empezar contadores limpios
         self.total_parpadeos   = 0
         self.total_prolongados = 0
@@ -3030,9 +3478,10 @@ class InterfazFatiga(ctk.CTkFrame):
     def _actualizar_perclos(self, cerrado):
         """PERCLOS = % de tiempo real con ojos cerrados en los últimos
         PERCLOS_VENTANA segundos. Medido con time.time() (no cuenta de
-        cuadros), igual que la duración de cierre."""
+        cuadros), igual que la duración de cierre. cerrado=None (no evaluable:
+        mirando abajo, de perfil, calibrando) no suma ni abierto ni cerrado."""
         ahora = time.time()
-        if self._ultimo_ts_perclos is None:
+        if self._ultimo_ts_perclos is None or cerrado is None:
             self._ultimo_ts_perclos = ahora
             return
         dt = ahora - self._ultimo_ts_perclos
@@ -3050,27 +3499,10 @@ class InterfazFatiga(ctk.CTkFrame):
         else:
             self.perclos_actual = 0.0
 
-    def _clasificar_cierre(self, duracion_ms, asimetria_max):
-        """Clasifica un cierre terminado. Devuelve (etiqueta, categoria).
-        categoria ∈ {"parpadeo", "prolongado", "falso"} gobierna el conteo:
-          - parpadeo   → suma a total_parpadeos y a la frecuencia (bpm)
-          - prolongado → señal de fatiga, cuenta aparte
-          - falso      → se registra para auditoría pero no cuenta"""
-        if asimetria_max > self.ASIMETRIA_MAX:
-            return "Falso-reflejo", "falso"     # un ojo cerró y el otro no → destello/lente
-        if duracion_ms < self.RUIDO_MIN_MS:
-            return "Falso-ruido", "falso"        # demasiado corto para ser humano
-        if duracion_ms <= self.NORMAL_MAX_MS:
-            return "Normal", "parpadeo"
-        if duracion_ms <= self.LENTO_MAX_MS:
-            return "Lento", "parpadeo"
-        if duracion_ms <= self.PROLONGADO_MAX_MS:
-            return "Prolongado", "prolongado"
-        return "Microsueño", "prolongado"        # >2000 ms: con baseline estable es ojo cerrado real
-
-    def _registrar_cierre(self, duracion_ms, etiqueta, categoria, ear_suavizado, frame):
+    def _registrar_cierre(self, duracion_ms, etiqueta, categoria, ear_suavizado, frame,
+                          profundidad=0.0):
         print(f"DEBUG cierre: {duracion_ms:.0f} ms | {etiqueta} ({categoria}) | "
-              f"umbral={self.p_umbral_ear:.3f} | asim={self.asimetria_max_cierre:.3f} | "
+              f"prof={profundidad:.2f} | baseline={self.detector.baseline or 0:.3f} | "
               f"fps={self._fps:.0f}")
         if categoria == "parpadeo":
             self.total_parpadeos += 1
@@ -3101,26 +3533,6 @@ class InterfazFatiga(ctk.CTkFrame):
             nivel_fatiga=indice_clasif, duracion_ms=duracion_ms,
             clasificacion_parpadeo=etiqueta,
             perclos=self.perclos_actual, indice_fatiga=indice_score)
-
-    def _resolver_cierre_anomalo(self, ear_actual, dur_ms, ear_suavizado, frame):
-        """Cierre en vivo > EMERGENCIA_MS. Con el baseline estable esto casi
-        siempre es un cierre genuinamente largo (microsueño): se registra como
-        prolongado SIN tocar el baseline. Solo si el EAR actual está cerca del
-        baseline (el ojo en realidad está abierto y el baseline quedó bajo) se
-        fuerza una recalibración. Distinguir por comparación con el baseline
-        evita el bug anterior de tomar un EAR de ojo cerrado como 'abierto'."""
-        ref = self._baseline_abierto if self._baseline_abierto else ear_actual
-        if ear_actual >= 0.85 * ref:
-            print(f"DEBUG emergencia BASELINE-BAJO: EAR={ear_actual:.3f} ref={ref:.3f} → recalibrar")
-            self._baseline_abierto = ear_actual
-            self._aplicar_umbral_desde_baseline()
-            self.total_falsos += 1
-            return "Recalibrando baseline"
-        print(f"DEBUG emergencia CIERRE-REAL: EAR={ear_actual:.3f} ref={ref:.3f} dur={dur_ms:.0f}ms")
-        if time.time() >= self.cooldown_hasta:
-            self._registrar_cierre(dur_ms, "Cierre-largo", "prolongado", ear_suavizado, frame)
-            self.cooldown_hasta = time.time() + (self.p_cooldown / self.FPS_REFERENCIA)
-        return "Cierre prolongado real"
 
     def _calcular_indice_fatiga(self):
         """Índice 0-100 combinando PERCLOS, duración de cierre, frecuencia de
@@ -3189,8 +3601,13 @@ class InterfazFatiga(ctk.CTkFrame):
         self.bar_indice.set(min(1.0, score / 100))
         self.bar_indice.configure(progress_color=color_indice)
 
+        calentando = (self.deteccion_inicio is None
+                      or time.time() - self.deteccion_inicio < self.CALENTAMIENTO_S)
+
         # Canal 1: aviso dentro de la app, siempre visible mientras la ventana lo esté.
-        if clasificacion in ("Moderada", "Severa"):
+        if calentando:
+            self.label_alerta.configure(text="")
+        elif clasificacion in ("Moderada", "Severa"):
             self.label_alerta.configure(
                 text=f"¡ALERTA FATIGA!\nÍndice {clasificacion.upper()}\nPERCLOS {self.perclos_actual:.0f}%")
         elif 0 < bpm < 10:
@@ -3199,6 +3616,10 @@ class InterfazFatiga(ctk.CTkFrame):
             self.label_alerta.configure(text="")
 
         # Canales 2 a 4: el gestor decide cuáles disparar y evita repetirlos.
+        # Solo después del calentamiento: antes, las ventanas de 60 s están
+        # incompletas y la frecuencia ~0/min dispararía alertas falsas.
+        if calentando:
+            return
         self.alertas.evaluar(clasificacion, score, self.perclos_actual, bpm)
 
     @staticmethod
@@ -3223,35 +3644,14 @@ class InterfazFatiga(ctk.CTkFrame):
             slider.set(valor)
 
     def _aplicar_umbral_desde_baseline(self):
-        """Deriva p_umbral_ear del baseline (para el slider/gráfica y el fallback)."""
-        if self._baseline_abierto is None:
+        """Refleja en p_umbral_ear (slider y gráfica EAR) el umbral de inicio de
+        cierre del detector. Solo toca el slider si cambió de forma visible."""
+        if self.detector.baseline is None:
             return
-        self.p_umbral_ear = max(0.08, min(0.40, round(self._baseline_abierto * self.K_CERRAR, 3)))
-        self._set_slider("sl_umbral", self.p_umbral_ear)
-
-    def _actualizar_baseline(self, ear, ojo_abierto_confiable):
-        """Mantiene self._baseline_abierto = EAR típico de ojo abierto del usuario.
-        Fase calibración: junta muestras BASELINE_CALIB_S s y toma el percentil 75
-        (robusto a algún parpadeo). Fase operación: EMA lento y solo con ojo abierto
-        confiable, para no contaminar el baseline con cierres."""
-        if not self.baseline_calibrado:
-            if self.baseline_calib_inicio is None:
-                self.baseline_calib_inicio = time.time()
-                self.baseline_muestras = []
-            self.baseline_muestras.append(ear)
-            if time.time() - self.baseline_calib_inicio >= self.BASELINE_CALIB_S and self.baseline_muestras:
-                muestras = sorted(self.baseline_muestras)
-                self._baseline_abierto  = muestras[int(len(muestras) * 0.75)]
-                self.baseline_calibrado = True
-                self._aplicar_umbral_desde_baseline()
-                print(f"DEBUG baseline calibrado: {self._baseline_abierto:.3f} "
-                      f"→ umbral {self.p_umbral_ear:.3f}")
-            return
-
-        if ojo_abierto_confiable and self._baseline_abierto is not None:
-            self._baseline_abierto = ((1 - self.BASELINE_EMA) * self._baseline_abierto
-                                      + self.BASELINE_EMA * ear)
-            self._aplicar_umbral_desde_baseline()
+        umbral = max(0.08, min(0.40, round(self.detector.baseline * DetectorParpadeo.K_INICIO, 3)))
+        if abs(umbral - self.p_umbral_ear) >= 0.005:
+            self.p_umbral_ear = umbral
+            self._set_slider("sl_umbral", umbral)
 
     def _suavizar_puntos(self, puntos_nuevos, atributo, alpha=0.5):
         previos = getattr(self, atributo)
@@ -3286,6 +3686,9 @@ class InterfazFatiga(ctk.CTkFrame):
                     self.after(500, self.actualizar_video)
                 return
 
+            if self.debug_logger:
+                self.debug_logger.grabar_cuadro_crudo(frame)  # crudo, sin espejo ni landmarks
+
             frame = cv2.flip(frame, 1)
             h, w, _ = frame.shape
 
@@ -3312,122 +3715,93 @@ class InterfazFatiga(ctk.CTkFrame):
 
             frame_rgb = cv2.cvtColor(frame_adj, cv2.COLOR_BGR2RGB)
             mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            # Timestamp real y estrictamente creciente (requisito de VIDEO mode).
+            self.timestamp_ms = max(int((time.time() - self._mp_t0) * 1000),
+                                    self.timestamp_ms + 1)
             resultado = self.face_landmarker.detect_for_video(mp_image, self.timestamp_ms)
-            self.timestamp_ms += 33
+            t_cuadro  = time.time()
 
             ear_suavizado = 0.0
             recorte_cara  = None
             estado_ojo    = "—"
+            ear_izq = ear_der = ear = movimiento = giro_cabeza = None
+            pitch = yaw = None
 
             if resultado.face_landmarks:
-                for face_landmarks in resultado.face_landmarks:
-                    p_izq = CalculadorEAR.obtener_coordenadas(
-                        CalculadorEAR.OJO_IZQUIERDO, face_landmarks, w, h)
-                    p_der = CalculadorEAR.obtener_coordenadas(
-                        CalculadorEAR.OJO_DERECHO, face_landmarks, w, h)
+                face_landmarks = resultado.face_landmarks[0]
 
-                    p_izq = self._suavizar_puntos(p_izq, "_ema_izq", alpha=0.8)
-                    p_der = self._suavizar_puntos(p_der, "_ema_der", alpha=0.8)
+                # EAR en 3D sobre los landmarks crudos: con la cabeza girada el
+                # ojo lejano no se escorza, y sin el retraso del suavizado los
+                # parpadeos rápidos no se fusionan.
+                ear_izq = CalculadorEAR.calcular_ear_ojo(CalculadorEAR.obtener_coordenadas_3d(
+                    CalculadorEAR.OJO_IZQUIERDO, face_landmarks, w, h))
+                ear_der = CalculadorEAR.calcular_ear_ojo(CalculadorEAR.obtener_coordenadas_3d(
+                    CalculadorEAR.OJO_DERECHO, face_landmarks, w, h))
+                ear     = (ear_izq + ear_der) / 2.0
+                self.historico_ear.append(ear)  # memoria cruda, siempre, abierto y cerrado
+                self.ear_buffer.append(ear)
+                ear_suavizado = sum(self.ear_buffer) / len(self.ear_buffer)
 
-                    ear_izq = CalculadorEAR.calcular_ear_ojo(p_izq)
-                    ear_der = CalculadorEAR.calcular_ear_ojo(p_der)
-                    ear     = (ear_izq + ear_der) / 2.0
-                    self.historico_ear.append(ear)  # memoria cruda, siempre, abierto y cerrado
-                    self.ear_buffer.append(ear)
-                    ear_suavizado = sum(self.ear_buffer) / len(self.ear_buffer)
+                # El suavizado EMA queda solo para dibujar (evita el temblor).
+                p_izq = self._suavizar_puntos(CalculadorEAR.obtener_coordenadas(
+                    CalculadorEAR.OJO_IZQUIERDO, face_landmarks, w, h), "_ema_izq", alpha=0.8)
+                p_der = self._suavizar_puntos(CalculadorEAR.obtener_coordenadas(
+                    CalculadorEAR.OJO_DERECHO, face_landmarks, w, h), "_ema_der", alpha=0.8)
+                self.dibujar_ojo(frame, p_izq)
+                self.dibujar_ojo(frame, p_der)
 
-                    self.dibujar_ojo(frame, p_izq)
-                    self.dibujar_ojo(frame, p_der)
+                if resultado.facial_transformation_matrixes:
+                    pitch, yaw, _ = CalculadorEAR.pose_desde_matriz(
+                        resultado.facial_transformation_matrixes[0])
+                    self._ultimo_pitch = pitch
 
-                    nariz_x = int(face_landmarks[1].x * w)
-                    nariz_y = int(face_landmarks[1].y * h)
-                    if self.nariz_previa is not None:
-                        movimiento = math.dist((nariz_x, nariz_y), self.nariz_previa)
+                nariz_x = int(face_landmarks[1].x * w)
+                nariz_y = int(face_landmarks[1].y * h)
+                if self.nariz_previa is not None:
+                    movimiento = math.dist((nariz_x, nariz_y), self.nariz_previa)
+                else:
+                    movimiento = 0
+                self.nariz_previa = (nariz_x, nariz_y)
+                # Giro aproximado: posición de la nariz entre las comisuras
+                # externas de los ojos (0 = de frente, ±1 = de perfil).
+                ojo_a, ojo_b = face_landmarks[33].x, face_landmarks[263].x
+                if abs(ojo_b - ojo_a) > 1e-6:
+                    giro_cabeza = ((face_landmarks[1].x - (ojo_a + ojo_b) / 2)
+                                   / (abs(ojo_b - ojo_a) / 2))
+
+                r = self.detector.procesar(t_cuadro, ear_izq, ear_der, pitch, yaw, movimiento)
+                estado_ojo = r["estado"]
+                self._actualizar_perclos(r["cerrado"])
+                self._aplicar_umbral_desde_baseline()
+                evento = r["evento"]
+                if evento:
+                    if time.time() >= self.cooldown_hasta:
+                        self._registrar_cierre(evento["duracion_ms"], evento["etiqueta"],
+                                               evento["categoria"], ear_suavizado, frame,
+                                               evento["profundidad"])
+                        self.cooldown_hasta = time.time() + (self.p_cooldown / self.FPS_REFERENCIA)
                     else:
-                        movimiento = 0
-                    self.nariz_previa = (nariz_x, nariz_y)
+                        print(f"DEBUG bloqueado por cooldown: {evento['duracion_ms']:.0f} ms")
 
-                    # ── Máquina de estados de parpadeo con histéresis ──
-                    # Umbrales derivados del baseline de ojo abierto (estable): cerrar
-                    # (bajo) y abrir (alto). La banda muerta entre ambos evita el
-                    # "chattering" (un mismo parpadeo partido en dos). La duración se
-                    # mide en tiempo real (time.time()), no en cuadros, porque el loop
-                    # no corre a FPS fijo.
-                    asimetria = abs(ear_izq - ear_der)
+                self.label_estado_ojo.configure(text=f"Ojo: {estado_ojo}")
 
-                    if not self.baseline_calibrado:
-                        # Calibración implícita: fijar el baseline con ojos abiertos.
-                        self._actualizar_baseline(ear, False)
-                        self._actualizar_perclos(False)
-                        estado_ojo = "Calibrando... (mantené ojos abiertos)"
-                    else:
-                        umbral_cerrar = self._baseline_abierto * self.K_CERRAR
-                        umbral_abrir  = self._baseline_abierto * self.K_ABRIR
-                        # Adaptar baseline solo con ojo abierto confiable (no en cierre).
-                        ojo_abierto_confiable = (not self.ojo_cerrado) and (ear > umbral_abrir)
-                        self._actualizar_baseline(ear, ojo_abierto_confiable)
+                # Recorte a la cara (para mostrar en pantalla y para medir
+                # brillo/contraste en el auto-ajuste de imagen; no afecta detección)
+                xs = [int(lm.x * w) for lm in face_landmarks]
+                ys = [int(lm.y * h) for lm in face_landmarks]
+                x1 = max(0, min(xs) - 80);  y1 = max(0, min(ys) - 120)
+                x2 = min(w, max(xs) + 80);  y2 = min(h, max(ys) + 120)
+                if x2 > x1 and y2 > y1:
+                    recorte_cara = (x1, y1, x2, y2)
 
-                        if not self.ojo_cerrado:
-                            self._actualizar_perclos(False)
-                            if movimiento > self.umbral_movimiento:
-                                estado_ojo = "Moviendo cabeza (ignorado)"
-                            elif ear < umbral_cerrar:
-                                self.ojo_cerrado          = True
-                                self.cierre_inicio        = time.time()
-                                self.cierre_fin           = self.cierre_inicio
-                                self.asimetria_max_cierre = asimetria
-                                estado_ojo = "Cerrando..."
-                            else:
-                                estado_ojo = "Abierto"
-                        else:
-                            self._actualizar_perclos(True)
-                            self.asimetria_max_cierre = max(self.asimetria_max_cierre, asimetria)
-                            # Duración = tiempo de FASE PROFUNDA (EAR bajo umbral_cerrar),
-                            # no hasta umbral_abrir: la cola de reapertura inflaba ~2x.
-                            if ear < umbral_cerrar:
-                                self.cierre_fin = time.time()
-                            dur_ms      = (self.cierre_fin - self.cierre_inicio) * 1000 if self.cierre_inicio else 0.0
-                            dur_vivo_ms = (time.time() - self.cierre_inicio) * 1000 if self.cierre_inicio else 0.0
-
-                            if dur_vivo_ms > self.EMERGENCIA_MS:
-                                estado_ojo = self._resolver_cierre_anomalo(ear, dur_ms, ear_suavizado, frame)
-                                self.ojo_cerrado   = False
-                                self.cierre_inicio = None
-                            elif ear > umbral_abrir:
-                                # Reabrió → fin del cierre: clasificar y (si pasó cooldown) registrar.
-                                etiqueta, categoria = self._clasificar_cierre(dur_ms, self.asimetria_max_cierre)
-                                if time.time() >= self.cooldown_hasta:
-                                    self._registrar_cierre(dur_ms, etiqueta, categoria, ear_suavizado, frame)
-                                    self.cooldown_hasta = time.time() + (self.p_cooldown / self.FPS_REFERENCIA)
-                                else:
-                                    print(f"DEBUG bloqueado por cooldown: {dur_ms:.0f} ms")
-                                self.ojo_cerrado   = False
-                                self.cierre_inicio = None
-                                estado_ojo = "Abierto"
-                            else:
-                                estado_ojo = "Cerrado..."
-
-                    self.label_estado_ojo.configure(text=f"Ojo: {estado_ojo}")
-
-                    # Recorte a la cara (para mostrar en pantalla y para medir
-                    # brillo/contraste en el auto-ajuste de imagen; no afecta detección)
-                    xs = [int(lm.x * w) for lm in face_landmarks]
-                    ys = [int(lm.y * h) for lm in face_landmarks]
-                    x1 = max(0, min(xs) - 80);  y1 = max(0, min(ys) - 120)
-                    x2 = min(w, max(xs) + 80);  y2 = min(h, max(ys) + 120)
-                    if x2 > x1 and y2 > y1:
-                        recorte_cara = (x1, y1, x2, y2)
-
-                    self._procesar_auto_calibracion(ear, frame, recorte_cara)
+                self._procesar_auto_calibracion(ear, frame, recorte_cara)
             else:
                 self.label_estado_ojo.configure(text="Ojo: sin rostro")
                 self._ema_izq = None
                 self._ema_der = None
                 self.nariz_previa = None
-                self.ojo_cerrado = False
-                self.cierre_inicio = None
-                self.cierre_fin = None
-                self._ultimo_ts_perclos = None
+                self.detector.sin_rostro(t_cuadro)  # no evaluable: cancela el cierre en curso
+                self._actualizar_perclos(None)
 
             # Marco verde + etiqueta sobre la cara (frame completo, con contexto).
             if recorte_cara:
@@ -3436,10 +3810,30 @@ class InterfazFatiga(ctk.CTkFrame):
                 if self.guia_activa:
                     etiqueta = self.GUIA_FASES[self.guia_fase_idx][0]  # letra de fase
                 else:
-                    etiqueta = estado_ojo.split()[0]
+                    etiqueta = estado_ojo.split(" (")[0]  # "Mirando abajo", no solo "Mirando"
                 cv2.putText(frame, etiqueta, (x1, max(24, y1 - 10)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            if self.debug_logger:
+                base = self.detector.baseline
+                self.debug_logger.capturar_si_toca(frame)
+                self.debug_logger.log(
+                    rostro=int(bool(resultado.face_landmarks)),
+                    ear_izq=ear_izq, ear_der=ear_der, ear_usado=ear,
+                    ear_suavizado=ear_suavizado, baseline=base,
+                    umbral_cerrar=base * DetectorParpadeo.K_INICIO if base else None,
+                    umbral_abrir=base * DetectorParpadeo.K_REAPERTURA_ABS if base else None,
+                    ojo_cerrado=int(self.detector.cerrado), estado=estado_ojo,
+                    parpadeos=self.total_parpadeos, giro_cabeza=giro_cabeza,
+                    pitch=pitch, yaw=yaw,
+                    no_evaluable_s=self.detector.no_evaluable_s,
+                    movimiento_px=movimiento, fps=self._fps)
             frame_mostrar = self._ajustar_a_marco(frame, 640, 480)
+            if self.debug_logger and giro_cabeza is not None:
+                # Guía para las pruebas de giro: 0.7-0.9 ≈ 35-40° (verde)
+                en_rango = 0.7 <= abs(giro_cabeza) <= 0.9
+                cv2.putText(frame_mostrar, f"GIRO {giro_cabeza:+.2f}", (440, 465),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                            (0, 255, 0) if en_rango else (0, 165, 255), 2)
 
             self.label_ear.configure(text=f"EAR: {ear_suavizado:.3f}")
             self.label_parpadeos.configure(text=str(self.total_parpadeos))
@@ -3475,6 +3869,7 @@ class InterfazFatiga(ctk.CTkFrame):
         o al cerrar sesión; el panel en sí lo destruye Tk con su padre."""
         self.sistema_activo  = False
         self._grafico_activo = False  # corta el bucle after() de la gráfica EAR
+        self._cerrar_debug_logger()
         if self.cap:
             self.cap.release()
             self.cap = None

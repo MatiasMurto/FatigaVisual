@@ -60,3 +60,10 @@ error_log.txt
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# ============================================
+# Datos de prueba (videos de la cara: NO subir)
+# ============================================
+debug_argos/
+argos_datos_prueba.zip
+validacion.zip
