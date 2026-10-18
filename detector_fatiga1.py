@@ -2948,6 +2948,36 @@ CLAVES_RECOMENDACION = frozenset(("Leve", "Moderada", "Severa", "BajaFrecuencia"
 COLA_RECOMENDACIONES = queue.Queue(maxsize=32)
 
 
+# Identidad propia para las notificaciones de Windows: con ella el encabezado
+# dice "Argos" con el ícono del ojo (antes "Windows PowerShell 5.1") y Argos
+# aparece con su nombre en Configuración → Notificaciones.
+AUMID_ARGOS = "Argos.MonitorFatiga"
+AUMID_POWERSHELL = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
+AUMID_TOAST = AUMID_POWERSHELL          # pasa a AUMID_ARGOS si el registro funciona
+
+
+def registrar_identidad_notificaciones():
+    """Registra AUMID_ARGOS por usuario (sin administrador), idempotente."""
+    global AUMID_TOAST
+    try:
+        valores = {"DisplayName": "Argos",
+                   "IconUri": os.path.join(ASSETS_DIR, "logo_ojo.png"),
+                   "IconBackgroundColor": "FF101820"}
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                                rf"Software\Classes\AppUserModelId\{AUMID_ARGOS}", 0,
+                                winreg.KEY_READ | winreg.KEY_WRITE) as llave:
+            for nombre, valor in valores.items():
+                try:
+                    actual, tipo = winreg.QueryValueEx(llave, nombre)
+                except OSError:
+                    actual, tipo = None, None
+                if actual != valor or tipo != winreg.REG_SZ:
+                    winreg.SetValueEx(llave, nombre, 0, winreg.REG_SZ, valor)
+        AUMID_TOAST = AUMID_ARGOS
+    except OSError as exc:
+        print(f"DEBUG identidad de notificaciones: {exc}")
+
+
 def registrar_protocolo_argos():
     """Registro por usuario, idempotente; no requiere privilegios de administrador."""
     try:
@@ -4140,7 +4170,7 @@ class GestorAlertas:
         acciones = (f'<actions><action content="Ver recomendación" arguments={uri} '
                     'activationType="protocol"/></actions>') if recomendacion else ''
         return (apertura + '<visual><binding template="ToastGeneric">'
-                f'<text>{texto("ARGOS · " + titulo)}</text>'
+                f'<text>{texto(titulo)}</text>'
                 f'<text>{texto(cuerpo)}</text>{logo}'
                 f'</binding></visual>{acciones}</toast>')
 
@@ -4159,7 +4189,7 @@ class GestorAlertas:
             " ContentType = WindowsRuntime] | Out-Null; "
             "$x = New-Object Windows.Data.Xml.Dom.XmlDocument; "
             f"$x.LoadXml('{xml}'); "
-            "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'; "
+            f"$id = '{AUMID_TOAST}'; "
             "$toast = [Windows.UI.Notifications.ToastNotification]::new($x); "
             f"$toast.Tag = '{tag_ps}'; $toast.Group = 'argos'; "
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show($toast)"
@@ -6126,6 +6156,7 @@ if __name__ == "__main__":
     if _pendiente_recomendacion and enviar_recomendacion(_pendiente_recomendacion):
         sys.exit(0)
     registrar_protocolo_argos()
+    registrar_identidad_notificaciones()
     escuchar_recomendaciones()
     if _pendiente_recomendacion:
         COLA_RECOMENDACIONES.put_nowait(_pendiente_recomendacion)
