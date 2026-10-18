@@ -901,6 +901,10 @@ class DetectorParpadeo:
                 self._largo_registrado = False
                 return self._resultado("Cerrando...", cerrado=True)
             self._actualizar_baseline(t, ear, ear_izq, ear_der, pitch)
+            if ear < B * self.K_INICIO:
+                # Bajo el umbral pero sin caída nítida (deriva lenta, entrecerrar):
+                # el pico decae para que una caída vieja no dispare un cierre.
+                self._pico = max(ear, self._pico * 0.9)
             estado = ("Moviendo cabeza (ignorado)" if movimiento > self.MOVIMIENTO_MAX_PX
                       else "Abierto")
             return self._resultado(estado, cerrado=False)
