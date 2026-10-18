@@ -3341,7 +3341,7 @@ class InterfazFatiga(ctk.CTkFrame):
             if self.cap:
                 self.cap.release()
             self._cerrar_debug_logger()
-            self.label_video.configure(image=None, text="")
+            self._limpiar_video("")
 
     def _cerrar_debug_logger(self):
         if self.debug_logger:
@@ -3361,7 +3361,7 @@ class InterfazFatiga(ctk.CTkFrame):
         """Interruptor de cámara: sincroniza el switch con la visibilidad real."""
         self.camara_visible = bool(self.sw_camara.get())
         if not self.camara_visible:
-            self.label_video.configure(image=None, text="[ Cámara oculta ]")
+            self._limpiar_video("[ Cámara oculta ]")
 
     def _sw_metricas(self):
         """Interruptor: muestra u oculta el bloque de métricas en vivo."""
@@ -3679,6 +3679,19 @@ class InterfazFatiga(ctk.CTkFrame):
             cv2.circle(frame, puntos[i], 3, (0, 255, 0), -1)
 
     def actualizar_video(self):
+        """Bucle de video (cadena de after). Un error en un cuadro se registra
+        y el bucle sigue: antes, una excepción acá cortaba la cadena y la
+        detección se detenía en silencio aunque la app dijera ACTIVO."""
+        espera_ms = 10
+        try:
+            espera_ms = self._procesar_cuadro()
+        except Exception:
+            traceback.print_exc()
+        if self.sistema_activo:
+            self.after(espera_ms, self.actualizar_video)
+
+    def _procesar_cuadro(self):
+        """Procesa un cuadro. Devuelve los ms hasta el próximo."""
         if self.sistema_activo and self.cap.isOpened():
             try:
                 ret, frame = self.cap.read()
@@ -3686,9 +3699,7 @@ class InterfazFatiga(ctk.CTkFrame):
                 ret = False
             if not ret:
                 self.label_estado_ojo.configure(text="Ojo: sin señal")
-                if self.sistema_activo:
-                    self.after(500, self.actualizar_video)
-                return
+                return 500
 
             if self.debug_logger:
                 self.debug_logger.grabar_cuadro_crudo(frame)  # crudo, sin espejo ni landmarks
@@ -3863,10 +3874,17 @@ class InterfazFatiga(ctk.CTkFrame):
                 self.label_video.imgtk = imgtk
                 self.label_video.configure(image=imgtk, text="")
             else:
-                self.label_video.configure(image=None, text="[ Cámara oculta ]")
+                self._limpiar_video("[ Cámara oculta ]")
+        return 10
 
-        if self.sistema_activo:
-            self.after(10, self.actualizar_video)
+    def _limpiar_video(self, texto):
+        """Saca la imagen del label de video. CTkLabel 5.2.2 ignora image=None
+        en su label interno de Tk, que queda apuntando a un PhotoImage ya
+        liberado; al volver a mostrar la cámara Tk fallaba con
+        'image "pyimageN" doesn't exist'. Por eso se limpia también el interno."""
+        self.label_video.configure(image=None, text=texto)
+        self.label_video._label.configure(image="")
+        self.label_video.imgtk = None
 
     def detener_todo(self):
         """Suelta cámara y modelo. La llama la carcasa al cerrar la aplicación
