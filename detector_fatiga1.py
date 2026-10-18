@@ -20,6 +20,7 @@ import subprocess
 from collections import deque
 import time
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import messagebox
 from PIL import Image
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -28,7 +29,8 @@ import win32api
 import win32net
 import win32security
 import winreg
-from PIL import Image, ImageTk, ImageOps
+from PIL import Image, ImageTk, ImageOps, ImageSequence
+import random
 import os
 from datetime import datetime
 
@@ -71,7 +73,11 @@ ASSETS_DIR = os.path.join(_dir_recursos(), "assets")
 ICON_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.ico")
 LOGO_PATH  = os.path.join(ASSETS_DIR, "logo_ojo.png")
 SPLASH_LOGO_PATH = os.path.join(ASSETS_DIR, "argos_logo_transparente.png")
-SPLASH_BG_PATH = os.path.join(ASSETS_DIR, "menu_inicial.png")
+SPLASH_BG_PATH = next(
+    (os.path.join(ASSETS_DIR, nombre)
+     for nombre in ("menu_inicial.gif", "menu_inicial.webp")
+     if os.path.isfile(os.path.join(ASSETS_DIR, nombre))),
+    os.path.join(ASSETS_DIR, "menu_inicial.png"))
 
 # ── Tipografía propia (viaja con la app) ─────────────────────────────
 # Cinzel (SIL OFL 1.1) se usa solo en la portada. Se registra en el proceso
@@ -1660,32 +1666,64 @@ class VentanaGestionUsuarios(ctk.CTkToplevel):
 
     def __init__(self, parent, bd):
         super().__init__(parent)
-        self.title("Gestión de Usuarios")
+        tema = TemaArgos
+        self.title("Gestión de usuarios")
         aplicar_icono(self)
-        self.geometry("420x360")
+        self.geometry("620x500")
+        self.minsize(540, 360)
+        self.configure(fg_color=tema.FONDO)
         self.bd = bd
         self.lift()
         self.focus()
-
-        ctk.CTkLabel(self, text="Roles de usuario", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(16, 8))
-
-        self.lista = ctk.CTkScrollableFrame(self)
+        ctk.CTkLabel(self, text="Usuarios", font=tema.ui(22),
+                     text_color=tema.TEXTO, anchor="w").pack(fill="x", padx=20, pady=(20, 0))
+        ctk.CTkLabel(self, text="Administrá los roles de los perfiles de Argos",
+                     font=tema.ui(12), text_color=tema.TEXTO_TENUE,
+                     anchor="w").pack(fill="x", padx=20, pady=(0, 16))
+        self.lista = ctk.CTkScrollableFrame(self, fg_color=tema.FONDO,
+                     corner_radius=tema.RADIO, scrollbar_button_color=tema.ACENTO,
+                     scrollbar_button_hover_color=tema.ACENTO_VIVO)
         self.lista.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self._refrescar()
 
     def _refrescar(self):
+        tema = TemaArgos
         for widget in self.lista.winfo_children():
             widget.destroy()
-
-        for uid, nombre, rol in self.bd.obtener_usuarios():
-            fila = ctk.CTkFrame(self.lista, fg_color="transparent")
-            fila.pack(fill="x", pady=4)
-            ctk.CTkLabel(fila, text=nombre, width=160, anchor="w").pack(side="left", padx=(0, 6))
-            combo = ctk.CTkComboBox(fila, values=self.ROLES, width=140)
+        usuarios = self.bd.obtener_usuarios()
+        if not usuarios:
+            ctk.CTkLabel(self.lista, text="Todavía no hay perfiles registrados",
+                         font=tema.ui(14), text_color=tema.TEXTO_TENUE).pack(pady=32)
+        for uid, nombre, rol in usuarios:
+            fila = ctk.CTkFrame(self.lista, fg_color=tema.PANEL, border_width=1,
+                               border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+            fila.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(fila, text=nombre, anchor="w", justify="left", wraplength=440,
+                         font=tema.ui(15, "bold"), text_color=tema.TEXTO).pack(
+                             fill="x", padx=16, pady=(14, 4))
+            ctk.CTkLabel(fila, text=f"  {rol}  ", font=tema.ui(11),
+                         text_color=tema.ACENTO_VIVO if rol == "Administrador" else tema.TEXTO_SUAVE,
+                         fg_color=tema.PANEL_ALTO, corner_radius=tema.RADIO_CARD).pack(
+                             anchor="w", padx=16, pady=(0, 12))
+            acciones = ctk.CTkFrame(fila, fg_color=tema.PANEL)
+            acciones.pack(fill="x", padx=16, pady=(0, 14))
+            ctk.CTkLabel(acciones, text="Rol", font=tema.ui(12),
+                         text_color=tema.TEXTO_TENUE).pack(side="left", padx=(0, 10))
+            combo = ctk.CTkComboBox(acciones, values=self.ROLES, width=180, height=34,
+                         font=tema.ui(12), dropdown_font=tema.ui(12),
+                         fg_color=tema.FONDO, border_color=tema.LINEA,
+                         button_color=tema.ACENTO, button_hover_color=tema.ACENTO_VIVO,
+                         text_color=tema.TEXTO, dropdown_fg_color=tema.PANEL,
+                         dropdown_hover_color=tema.PANEL_ALTO, dropdown_text_color=tema.TEXTO,
+                         corner_radius=tema.RADIO)
             combo.set(rol)
-            combo.pack(side="left", padx=(0, 6))
-            ctk.CTkButton(fila, text="Guardar", width=70,
-                          command=lambda u=uid, c=combo: self._guardar(u, c.get())).pack(side="left")
+            combo.pack(side="left", padx=(0, 12))
+            ctk.CTkButton(acciones, text="Guardar", width=110, height=34,
+                          font=tema.ui(12), fg_color=tema.ACENTO,
+                          hover_color=tema.ACENTO_VIVO, text_color=tema.TEXTO,
+                          border_width=1, border_color=tema.ACENTO,
+                          corner_radius=tema.RADIO,
+                          command=lambda u=uid, c=combo: self._guardar(u, c.get())).pack(side="right")
 
     def _guardar(self, usuario_id, nuevo_rol):
         self.bd.actualizar_rol(usuario_id, nuevo_rol)
@@ -1817,37 +1855,48 @@ class MenuPrincipal(ctk.CTk):
         ancho = min(self.VENTANA_W, self.winfo_screenwidth())
         alto  = min(self.VENTANA_H, self.winfo_screenheight())
 
-        # ── Fondo permanente ──
-        imagen = ImageOps.fit(Image.open(SPLASH_BG_PATH), (ancho, alto),
-                              method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-        self.imagen_fondo = ctk.CTkImage(light_image=imagen, dark_image=imagen,
-                                          size=(ancho, alto))
-        
-        
-        
-        # La vista del menú ocupa toda la ventana
-        self.vista_menu = ctk.CTkFrame(
-            self,
-            fg_color="transparent",
-            corner_radius=0
-        )
-        self.vista_menu.place(
-            relx=0, rely=0,
-            relwidth=1, relheight=1
-        )
-
-        # LA IMAGEN ES EL FONDO INTERNO DEL MENÚ
-        self.fondo_menu = ctk.CTkLabel(
-            self.vista_menu,
-            text="",
-            image=self.imagen_fondo,
-            fg_color="transparent",
-            corner_radius=0
-        )
-        self.fondo_menu.place(
-            x=0, y=0,
-            relwidth=1, relheight=1
-        )
+        # El menú es un Canvas: la foto de fondo y los textos se dibujan en él.
+        # Tk no tiene transparencia real; con widgets, fg_color="transparent"
+        # pintaba cajas del color del contenedor encima de la foto.
+        self._fondo_tam = None
+        self._fondos_tk = []
+        self._fondo_duraciones = []
+        self._fondo_indice = 0
+        self._fondo_objetivo = None
+        self._fondo_listo = False
+        self._fondo_carga = None
+        self._fondo_carga_after = None
+        self._fondo_id = self._ojo_id = None
+        try:
+            from generar_assets import dibujar_ojo
+        except ImportError:
+            dibujar_ojo = None
+        self._dibujar_ojo = dibujar_ojo
+        self._ojo_originales = []
+        for nombre in (() if dibujar_ojo else
+                       ("ojo_abierto.png", "ojo_semi.png", "ojo_cerrado.png")):
+            with Image.open(os.path.join(ASSETS_DIR, nombre)) as img:
+                self._ojo_originales.append(img.convert("RGBA"))
+        self._ojos_tk = []
+        self._ojo_tam = None
+        self._ojo_cuadro = 0
+        self._ojo_inicio = None
+        self._ojo_doble = False
+        self._animaciones_pausa = None
+        self._menu_visible = False
+        self._animaciones_destruidas = False
+        self._animaciones = {
+            "fondo": {"after": None, "vence": None, "restante": None},
+            "ojo": {"after": None, "vence": None,
+                    "restante": round(random.uniform(2.5, 6) * 1000)},
+        }
+        self.bind("<Map>", self._estado_animaciones, add="+")
+        self.bind("<Unmap>", self._estado_animaciones, add="+")
+        self.vista_menu = ctk.CTkFrame(self, fg_color=TemaArgos.FONDO, corner_radius=0)
+        self.vista_menu.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.lienzo = tk.Canvas(self.vista_menu, highlightthickness=0, bd=0,
+                                bg=TemaArgos.FONDO)
+        self.lienzo.place(x=0, y=0, relwidth=1, relheight=1)
 
         # Fondo de las secciones, independiente del menú
         self.vista_seccion = ctk.CTkFrame(
@@ -1865,69 +1914,321 @@ class MenuPrincipal(ctk.CTk):
 
     # ══════════ MENÚ ══════════
     def _construir_menu(self):
-        v = self.vista_menu
+        self._botones_menu = []          # (clave, x1, y1, x2, y2) en px del canvas
+        self._hover_menu   = None
+        self._fecha_id = self._hora_id = None
+        self.lienzo.bind("<Configure>", lambda e: self._dibujar_menu())
+        self.lienzo.bind("<Motion>", self._menu_movimiento)
+        self.lienzo.bind("<Leave>", lambda e: self._menu_hover(None))
+        self.lienzo.bind("<Button-1>", self._menu_clic)
 
-        self.titulo_argos = ctk.CTkLabel(v, text="A  R  G  O  S",
-                                          font=("Agency FB",50),
-                                          text_color=TemaArgos.TEXTO,
-                                          fg_color="transparent")
-        self.titulo_argos.place(relx=self.COL_X, rely=self.TITULO_Y, anchor="w")
+    def _fuente_menu(self, familia, tamano, peso="normal"):
+        """Tamaño en px lógicos de CTk → px físicos (el Canvas no escala solo)."""
+        return (familia, -round(tamano * self._get_window_scaling()), peso)
 
-        ctk.CTkFrame(v, height=1, width=self.BTN_W,
-                     fg_color=TemaArgos.ACENTO).place(
-            relx=self.COL_X, rely=self.LINEA_Y, anchor="w")
+    def _dibujar_menu(self):
+        c = self.lienzo
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 50 or H < 50:
+            return
+        s = self._get_window_scaling()
 
+        # Fondo a la resolución física real, anclado arriba a la izquierda:
+        # sin recentrado ni estirado (antes saltaba ~50 px al aplicar el DPI).
+        if self._fondo_tam != (W, H):
+            self._preparar_fondo(W, H)
+        tam_ojo = max(1, round(120 * s))
+        if self._ojo_tam != tam_ojo:
+            if self._dibujar_ojo is not None:
+                self._ojos_tk = []
+                for nivel in range(16):
+                    with self._dibujar_ojo(tam_ojo * 4, 1 - nivel / 15) as img:
+                        self._ojos_tk.append(ImageTk.PhotoImage(img.resize(
+                            (tam_ojo, tam_ojo), Image.Resampling.LANCZOS), master=c))
+            else:
+                self._ojos_tk = [ImageTk.PhotoImage(img.resize(
+                    (tam_ojo, tam_ojo), Image.Resampling.LANCZOS), master=c)
+                    for img in self._ojo_originales]
+            self._ojo_tam = tam_ojo
+        c.delete("all")
+        self._fondo_id = c.create_image(
+            0, 0, image=self._fondos_tk[self._fondo_indice], anchor="nw")
+        self._ojo_id = c.create_image(
+            0.915 * W, 0.14 * H, image=self._ojos_tk[self._ojo_cuadro],
+            anchor="center")
+        self._sincronizar_animaciones()
+
+        x0     = self.COL_X * W
+        ancho  = self.BTN_W * s
+        ui_fam = ctk.ThemeManager.theme["CTkFont"]["family"]
+
+        c.create_text(x0, self.TITULO_Y * H, text="A  R  G  O  S", anchor="w",
+                      fill=TemaArgos.TEXTO, font=self._fuente_menu("Agency FB", 50))
+        c.create_line(x0, self.LINEA_Y * H, x0 + ancho, self.LINEA_Y * H,
+                      fill=TemaArgos.ACENTO, width=max(1, round(s)))
+
+        self._botones_menu = []
+        alto_btn = 34 * s
         fila = 0
         for clave, etiqueta, solo_admin in self.SECCIONES:
             if solo_admin and self.perfil_rol != "Administrador":
                 continue      # se oculta, en vez de ofrecer algo que no responde
-            ctk.CTkButton(
-                v, text=etiqueta, width=self.BTN_W, anchor="w",
-                font=ctk.CTkFont(family="Agency FB", size=18),
-                fg_color="transparent", hover_color=TemaArgos.PANEL_ALTO,
-                text_color=TemaArgos.TEXTO_SUAVE, corner_radius=TemaArgos.RADIO,
-                height=34,
-                command=lambda c=clave: self.abrir_seccion(c)
-            ).place(relx=self.COL_X,
-                    rely=self.BTN_Y0 + fila * self.BTN_PASO, anchor="w")
+            y = (self.BTN_Y0 + fila * self.BTN_PASO) * H
+            c.create_rectangle(x0, y - alto_btn / 2, x0 + 3 * s, y + alto_btn / 2,
+                               fill=TemaArgos.ACENTO_VIVO, width=0,
+                               state="hidden", tags=(f"barra_{clave}",))
+            c.create_text(x0 + 14 * s, y, text=etiqueta, anchor="w",
+                          fill=TemaArgos.TEXTO_SUAVE, tags=(f"txt_{clave}",),
+                          font=self._fuente_menu("Agency FB", 18))
+            self._botones_menu.append((clave, x0, y - alto_btn / 2, x0 + ancho, y + alto_btn / 2))
             fila += 1
 
         # ── Pie: sistema a la izquierda, sesión a la derecha ──
-        sistema = ctk.CTkFrame(v, fg_color="transparent")
-        sistema.place(relx=self.COL_X, rely=0.955, anchor="sw")
-        self.lbl_fecha = ctk.CTkLabel(sistema, text="", font=TemaArgos.dato(13),
-                                       text_color=TemaArgos.TEXTO_SUAVE, anchor="w")
-        self.lbl_fecha.pack(anchor="w")
-        self.lbl_hora = ctk.CTkLabel(sistema, text="", font=TemaArgos.dato(13),
-                                      text_color=TemaArgos.TEXTO_SUAVE, anchor="w")
-        self.lbl_hora.pack(anchor="w")
-        ctk.CTkLabel(sistema, text="● ARGOS OS v1.0.0", font=TemaArgos.dato(10),
-                     text_color=TemaArgos.TEXTO_TENUE, anchor="w").pack(
-            anchor="w", pady=(4, 0))
+        yb = 0.955 * H
+        self._fecha_id = c.create_text(x0, yb - 46 * s, anchor="sw", fill=TemaArgos.TEXTO_SUAVE,
+                                       font=self._fuente_menu("Consolas", 13))
+        self._hora_id = c.create_text(x0, yb - 24 * s, anchor="sw", fill=TemaArgos.TEXTO_SUAVE,
+                                      font=self._fuente_menu("Consolas", 13))
+        c.create_text(x0, yb, text="● ARGOS OS v1.0.0", anchor="sw",
+                      fill=TemaArgos.TEXTO_TENUE, font=self._fuente_menu("Consolas", 10))
+        self._refrescar_reloj()
 
-        sesion = ctk.CTkFrame(v, fg_color="transparent")
-        sesion.place(relx=0.965, rely=0.955, anchor="se")
-        caja = ctk.CTkFrame(sesion, fg_color="transparent")
-        caja.pack(side="left", padx=(0, 14))
-        
-        ctk.CTkLabel(caja, text=self.perfil_nombre, font=TemaArgos.ui(14, "bold"),
-                     text_color=TemaArgos.TEXTO, anchor="e").pack(anchor="e")
-        
-        ctk.CTkLabel(caja, text=self.perfil_rol.upper(), font=TemaArgos.dato(10),
-                     text_color=TemaArgos.TEXTO_TENUE, anchor="e").pack(anchor="e")
-        
-        ctk.CTkButton(
-                      sesion,   
-                      text="S A L I R", 
-                      width=88, height=30,
-                      font=ctk.CTkFont(family="Agency FB", size=18), 
-                      fg_color="transparent",
-                      hover_color=TemaArgos.RIESGO, 
-                      text_color=TemaArgos.TEXTO_SUAVE,
-                      border_width=1,
-                      border_color=TemaArgos.LINEA,
-                      corner_radius=TemaArgos.RADIO,
-                      command=self._cerrar_sesion).pack(side="left")
+        xd = 0.965 * W
+        bw, bh = 88 * s, 30 * s
+        c.create_rectangle(xd - bw, yb - bh, xd, yb, outline=TemaArgos.LINEA,
+                           width=max(1, round(s)), fill="", tags=("salir_caja",))
+        c.create_text(xd - bw / 2, yb - bh / 2, text="S A L I R", tags=("txt_salir",),
+                      fill=TemaArgos.TEXTO_SUAVE, font=self._fuente_menu("Agency FB", 18))
+        self._botones_menu.append(("salir", xd - bw, yb - bh, xd, yb))
+        xn = xd - bw - 14 * s
+        c.create_text(xn, yb - bh / 2 - 2 * s, text=self.perfil_nombre, anchor="se",
+                      fill=TemaArgos.TEXTO, font=self._fuente_menu(ui_fam, 14, "bold"))
+        c.create_text(xn, yb - bh / 2 + 2 * s, text=self.perfil_rol.upper(), anchor="ne",
+                      fill=TemaArgos.TEXTO_TENUE, font=self._fuente_menu("Consolas", 10))
+        if self._hover_menu:
+            self._menu_hover(self._hover_menu, forzar=True)
+
+    def _preparar_fondo(self, ancho, alto):
+        """Guardá sólo el tamaño actual; Tk usa unos 4 bytes por píxel."""
+        self._pausar_animaciones()
+        if self._fondo_carga is not None:
+            self._fondo_carga.close()
+        # Liberamos la caché anterior antes de armar la nueva. Reservamos
+        # margen para la conversión RGB, el recorte y las copias de Tk.
+        if self._fondo_id is not None:
+            self.lienzo.itemconfigure(self._fondo_id, image="")
+        self._fondos_tk.clear()
+        self._fondo_indice = 0
+        self._fondo_objetivo = None
+        self._fondo_listo = False
+        self._fondo_tam = (ancho, alto)
+        self._fondo_carga = self._cargar_cuadros_fondo(ancho, alto)
+        # Sólo el primer cuadro se prepara ahora; el resto deja respirar a Tk.
+        next(self._fondo_carga)
+
+    def _cargar_cuadros_fondo(self, ancho, alto):
+        presupuesto = 250 * 1024 * 1024
+        with Image.open(SPLASH_BG_PATH) as fuente:
+            duraciones = []
+            for i, cuadro in enumerate(ImageSequence.Iterator(fuente)):
+                duraciones.append(max(20, int(cuadro.info.get("duration", 80))))
+                if i == 0:
+                    self._agregar_cuadro_fondo(cuadro, ancho, alto)
+                yield
+            margen = fuente.width * fuente.height * 8 + ancho * alto * 8
+            capacidad = max(1, (presupuesto - margen) // (ancho * alto * 4))
+            salto = max(1, math.ceil(len(duraciones) / capacidad))
+            self._fondo_duraciones = [sum(duraciones[i:i + salto])
+                                     for i in range(0, len(duraciones), salto)]
+            # También repartimos la lectura: buscar cuadros de un GIF largo
+            # puede llevar tiempo aunque después salteemos algunos.
+            fuente.seek(0)
+            for i, cuadro in enumerate(ImageSequence.Iterator(fuente)):
+                if i and i % salto == 0:
+                    self._agregar_cuadro_fondo(cuadro, ancho, alto)
+                yield
+        self._fondo_listo = True
+        self._animaciones["fondo"]["restante"] = self._fondo_duraciones[0]
+
+    def _agregar_cuadro_fondo(self, cuadro, ancho, alto):
+        with cuadro.convert("RGB") as rgb:
+            with ImageOps.fit(rgb, (ancho, alto),
+                              method=Image.Resampling.LANCZOS) as img:
+                self._fondos_tk.append(ImageTk.PhotoImage(img, master=self.lienzo))
+
+    def _continuar_carga_fondo(self):
+        self._fondo_carga_after = None
+        if not self._animaciones_visibles() or self._fondo_carga is None:
+            return
+        limite = time.monotonic() + 0.008
+        try:
+            # Como máximo dos cuadros por callback, sin bloquear toda la carga.
+            for _ in range(2):
+                next(self._fondo_carga)
+                if time.monotonic() >= limite:
+                    break
+        except StopIteration:
+            self._fondo_carga = None
+        self._sincronizar_animaciones()
+
+    def _animaciones_visibles(self):
+        return (not self._animaciones_destruidas and self._menu_visible
+                and self.winfo_ismapped() and self.state() != "iconic"
+                and self.lienzo.winfo_ismapped())
+
+    def _programar_animacion(self, nombre, demora, objetivo=None):
+        estado = self._animaciones[nombre]
+        if estado["after"] is not None:
+            return
+        estado["restante"] = demora
+        if not self._animaciones_visibles():
+            return
+        estado["vence"] = (time.monotonic() + demora / 1000
+                           if objetivo is None else objetivo)
+        callback = self._avanzar_fondo if nombre == "fondo" else self._avanzar_ojo
+        restante = (estado["vence"] - time.monotonic()) * 1000
+        estado["after"] = self.after(max(1, math.ceil(restante)), callback)
+
+    def _pausar_animaciones(self):
+        if self._animaciones_pausa is None:
+            self._animaciones_pausa = time.monotonic()
+        if self._fondo_carga_after is not None:
+            self.after_cancel(self._fondo_carga_after)
+            self._fondo_carga_after = None
+        for estado in self._animaciones.values():
+            if estado["after"] is not None:
+                self.after_cancel(estado["after"])
+                estado["restante"] = max(
+                    1, round((estado["vence"] - time.monotonic()) * 1000))
+                estado["after"] = None
+                estado["vence"] = None
+
+    def _estado_animaciones(self, event):
+        # El binding del toplevel también recibe eventos de sus hijos.
+        if event.widget is self or event.widget is self.lienzo:
+            if event.type == tk.EventType.Unmap:
+                self._pausar_animaciones()
+            else:
+                self._sincronizar_animaciones()
+
+    def _sincronizar_animaciones(self):
+        if not self._animaciones_visibles():
+            self._pausar_animaciones()
+            return
+        if self._animaciones_pausa is not None:
+            pausa = time.monotonic() - self._animaciones_pausa
+            if self._ojo_inicio is not None:
+                self._ojo_inicio += pausa
+            if self._fondo_objetivo is not None:
+                self._fondo_objetivo += pausa
+            self._animaciones_pausa = None
+        if self._fondo_carga is not None and self._fondo_carga_after is None:
+            self._fondo_carga_after = self.after(16, self._continuar_carga_fondo)
+        if self._fondo_listo and self._fondo_id is not None and len(self._fondos_tk) > 1:
+            if self._fondo_objetivo is None:
+                self._fondo_objetivo = time.monotonic() + self._fondo_duraciones[0] / 1000
+            self._programar_animacion("fondo", 0, self._fondo_objetivo)
+        if self._ojo_id is not None:
+            self._programar_animacion("ojo", self._animaciones["ojo"]["restante"])
+
+    def _avanzar_fondo(self):
+        self._animaciones["fondo"]["after"] = None
+        if not self._animaciones_visibles():
+            self._pausar_animaciones()
+            return
+        ahora = time.monotonic()
+        anterior = self._fondo_indice
+        ciclo = sum(self._fondo_duraciones) / 1000
+        if ahora >= self._fondo_objetivo + ciclo:
+            self._fondo_objetivo += math.floor((ahora - self._fondo_objetivo) / ciclo) * ciclo
+        while ahora >= self._fondo_objetivo:
+            self._fondo_indice = (self._fondo_indice + 1) % len(self._fondos_tk)
+            self._fondo_objetivo += self._fondo_duraciones[self._fondo_indice] / 1000
+        if anterior != self._fondo_indice:
+            self.lienzo.itemconfigure(self._fondo_id,
+                                     image=self._fondos_tk[self._fondo_indice])
+        self._programar_animacion("fondo", 0, self._fondo_objetivo)
+
+    def _avanzar_ojo(self):
+        self._animaciones["ojo"]["after"] = None
+        if not self._animaciones_visibles():
+            self._pausar_animaciones()
+            return
+        ahora = time.monotonic()
+        if self._ojo_inicio is None:
+            self._ojo_inicio = ahora
+            self._ojo_doble = random.random() < 0.20
+        transcurrido = ahora - self._ojo_inicio
+        # El segundo parpadeo arranca tras 120 ms con el ojo abierto.
+        if self._ojo_doble and transcurrido >= 0.400:
+            self._ojo_inicio += 0.400
+            self._ojo_doble = False
+            transcurrido = ahora - self._ojo_inicio
+        demora = 16
+        if transcurrido < 0.090:
+            apertura = 1 - (transcurrido / 0.090) ** 2
+        elif transcurrido < 0.130:
+            apertura = 0
+        elif transcurrido < 0.280:
+            apertura = 1 - (1 - (transcurrido - 0.130) / 0.150) ** 2
+        else:
+            apertura = 1
+            if self._ojo_doble:
+                demora = max(1, math.ceil((0.400 - transcurrido) * 1000))
+            else:
+                self._ojo_inicio = None
+                demora = round(random.uniform(2.5, 6) * 1000)
+        nivel = round((1 - apertura) * (len(self._ojos_tk) - 1))
+        if nivel != self._ojo_cuadro:
+            self._ojo_cuadro = nivel
+            self.lienzo.itemconfigure(self._ojo_id, image=self._ojos_tk[nivel])
+        self._programar_animacion("ojo", demora)
+
+    def destroy(self):
+        self._animaciones_destruidas = True
+        if hasattr(self, "_animaciones"):
+            self._pausar_animaciones()
+        if getattr(self, "_fondo_carga", None) is not None:
+            self._fondo_carga.close()
+            self._fondo_carga = None
+        super().destroy()
+
+    def _boton_en(self, x, y):
+        for clave, x1, y1, x2, y2 in self._botones_menu:
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return clave
+        return None
+
+    def _menu_movimiento(self, event):
+        self._menu_hover(self._boton_en(event.x, event.y))
+
+    def _menu_hover(self, clave, forzar=False):
+        if clave == self._hover_menu and not forzar:
+            return
+        c = self.lienzo
+        anterior, self._hover_menu = self._hover_menu, clave
+        if anterior and anterior != clave:
+            if anterior == "salir":
+                c.itemconfigure("salir_caja", fill="")
+                c.itemconfigure("txt_salir", fill=TemaArgos.TEXTO_SUAVE)
+            else:
+                c.itemconfigure(f"barra_{anterior}", state="hidden")
+                c.itemconfigure(f"txt_{anterior}", fill=TemaArgos.TEXTO_SUAVE)
+        if clave == "salir":
+            c.itemconfigure("salir_caja", fill=TemaArgos.RIESGO)
+            c.itemconfigure("txt_salir", fill=TemaArgos.TEXTO)
+        elif clave:
+            c.itemconfigure(f"barra_{clave}", state="normal")
+            c.itemconfigure(f"txt_{clave}", fill=TemaArgos.TEXTO)
+        c.configure(cursor="hand2" if clave else "")
+
+    def _menu_clic(self, event):
+        clave = self._boton_en(event.x, event.y)
+        if clave == "salir":
+            self._cerrar_sesion()
+        elif clave:
+            self._menu_hover(None)
+            self.abrir_seccion(clave)
 
     # ══════════ MARCO DE SECCIÓN ══════════
     def _construir_marco_seccion(self):
@@ -1966,8 +2267,10 @@ class MenuPrincipal(ctk.CTk):
             if self.monitoreo.cap:
                 self.monitoreo.cap.release()
                 self.monitoreo.cap = None
+        self._menu_visible = True
         self.vista_seccion.place_forget()
         self.vista_menu.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._sincronizar_animaciones()
 
     def abrir_seccion(self, clave):
         if clave == "usuarios":
@@ -1985,6 +2288,8 @@ class MenuPrincipal(ctk.CTk):
         self.lbl_seccion.configure(text=self.TITULOS.get(clave, ""))
         self.lbl_seccion_sub.configure(text=self._subtitulo(clave))
 
+        self._menu_visible = False
+        self._pausar_animaciones()
         self.vista_menu.place_forget()
         self.vista_seccion.place(relx=0, rely=0, relwidth=1, relheight=1)
 
@@ -2001,10 +2306,15 @@ class MenuPrincipal(ctk.CTk):
 
     # ══════════ VARIOS ══════════
     def _actualizar_fecha_hora(self):
-        ahora = datetime.now()
-        self.lbl_fecha.configure(text=ahora.strftime("%d / %m / %Y"))
-        self.lbl_hora.configure(text=ahora.strftime("%H : %M : %S"))
+        self._refrescar_reloj()
         self.after(1000, self._actualizar_fecha_hora)
+
+    def _refrescar_reloj(self):
+        if self._fecha_id is None:
+            return
+        ahora = datetime.now()
+        self.lienzo.itemconfigure(self._fecha_id, text=ahora.strftime("%d / %m / %Y"))
+        self.lienzo.itemconfigure(self._hora_id, text=ahora.strftime("%H : %M : %S"))
 
     def _centrar(self):
         w = min(self.VENTANA_W, self.winfo_screenwidth())
@@ -2950,125 +3260,418 @@ class InterfazFatiga(ctk.CTkFrame):
                       command=self._restablecer_calibracion).pack(padx=12, pady=(8, 12), fill="x")
 
     def _refrescar_vista_estadisticas(self, contenedor, usuario_id, usuario_nombre):
-        """Reconstruye la vista de Estadísticas con datos frescos de la BD.
-        Se llama cada vez que se navega a esta sección (los datos cambian)."""
-        for w in contenedor.winfo_children():
-            w.destroy()
+        """Resumen de eventos descifrados; no infiere duración de sesiones."""
+        from collections import Counter, defaultdict
+        from datetime import timedelta
+        from matplotlib.ticker import MaxNLocator
 
-        ctk.CTkLabel(contenedor, text=f"Estadísticas — {usuario_nombre}",
-                     font=ctk.CTkFont(size=18, weight="bold"), anchor="w").pack(fill="x", pady=(0, 10))
+        for widget in contenedor.winfo_children():
+            widget.destroy()
+        tema = TemaArgos
+        # LIMIT -1 recupera todo por el mismo camino de descifrado del historial.
+        filas = self.bd.obtener_historial(usuario_id, limit=-1)
 
-        stats = self.bd.obtener_estadisticas(usuario_id)
-        total, avg_ear, primera, ultima, avg_perclos, avg_indice = stats if stats else (0, 0, "-", "-", 0, 0)
+        def numero(valor):
+            try:
+                valor = float(valor)
+                return valor if math.isfinite(valor) else None
+            except (ValueError, TypeError):
+                return None
 
-        frame_res = ctk.CTkFrame(contenedor, fg_color="transparent")
-        frame_res.pack(fill="x", pady=(0, 12))
-        cards = [
-            ("Total Parpadeos", str(total or 0)),
-            ("EAR Promedio",    str(avg_ear or 0)),
-            ("PERCLOS Prom.",   f"{avg_perclos or 0} %"),
-            ("Índice Fatiga",   str(avg_indice or 0)),
-            ("Primera sesión",  str(primera or "-")[:10]),
-            ("Última sesión",   str(ultima  or "-")[:10]),
+        def formato(valor, decimales=1, unidad=""):
+            valor = numero(valor)
+            return "—" if valor is None else f"{valor:.{decimales}f}".replace(".", ",") + unidad
+
+        def fecha(valor):
+            try:
+                return datetime.fromisoformat(valor)
+            except (ValueError, TypeError):
+                return None
+
+        def categoria(valor):
+            if valor.startswith("Falso") or valor == "Entrecerrado":
+                return "Falsos"
+            if valor == "Cierre-largo":
+                return "Prolongado"
+            return valor if valor in ("Normal", "Lento", "Prolongado", "Microsueño") else "Sin clasificar"
+
+        colores_nivel = {"Normal": tema.TEXTO_TENUE, "Leve": tema.ALERTA,
+                         "Moderada": tema.ALERTA, "Severa": tema.RIESGO}
+        colores_clase = {"Normal": tema.OK, "Lento": tema.ACENTO_VIVO,
+                         "Prolongado": tema.ALERTA, "Microsueño": tema.RIESGO,
+                         "Falsos": tema.TEXTO_TENUE, "Sin clasificar": tema.TEXTO_TENUE}
+
+        def etiqueta(parent, texto, tam=12, color=None, **kwargs):
+            return ctk.CTkLabel(parent, text=texto, font=tema.ui(tam),
+                                text_color=color or tema.TEXTO, **kwargs)
+
+        etiqueta(contenedor, "Estadísticas", 22, anchor="w").pack(fill="x")
+        etiqueta(contenedor, f"{usuario_nombre} · Resumen del historial", 12,
+                 tema.TEXTO_TENUE, anchor="w").pack(fill="x", pady=(0, 12))
+        contenido = ctk.CTkScrollableFrame(
+            contenedor, fg_color=tema.FONDO, corner_radius=tema.RADIO,
+            scrollbar_button_color=tema.ACENTO,
+            scrollbar_button_hover_color=tema.ACENTO_VIVO)
+        contenido.pack(fill="both", expand=True)
+
+        if not filas:
+            vacio = ctk.CTkFrame(contenido, fg_color=tema.PANEL,
+                                 corner_radius=tema.RADIO_CARD,
+                                 border_width=1, border_color=tema.LINEA)
+            vacio.pack(fill="x", padx=12, pady=30)
+            etiqueta(vacio, "Todavía no hay registros", 20).pack(pady=(48, 12))
+            etiqueta(vacio, "Iniciá una sesión de detección para ver tu actividad y su evolución.",
+                     13, tema.TEXTO_SUAVE, wraplength=550).pack(padx=24, pady=(0, 48))
+            return
+
+        conteos = Counter(categoria(f[5]) for f in filas)
+        diarios = defaultdict(list)
+        for f in filas:
+            d = fecha(f[0])
+            if d is not None:
+                diarios[d.date()].append(f)
+
+        def promedio(registros, columna):
+            valores = [v for f in registros if (v := numero(f[columna])) is not None]
+            return sum(valores) / len(valores) if valores else None
+
+        indice = promedio(filas, 7)
+        nivel = ("Sin datos" if indice is None else "Normal" if indice <= 30 else
+                 "Leve" if indice <= 60 else "Moderada" if indice <= 80 else "Severa")
+        tarjetas = [
+            ("Total de parpadeos", str(conteos["Normal"] + conteos["Lento"]), "Normales y lentos", tema.TEXTO),
+            ("Frecuencia media", "—", "Sin duración de sesiones", tema.TEXTO_TENUE),
+            ("PERCLOS promedio", formato(promedio(filas, 6), unidad=" %"), "Promedio por registro", tema.TEXTO),
+            ("Índice de fatiga", formato(indice), nivel, colores_nivel.get(nivel, tema.TEXTO_TENUE)),
+            ("Cierres prolongados", str(conteos["Prolongado"] + conteos["Microsueño"]), "Incluye microsueños", tema.TEXTO),
+            ("Días con sesiones", str(len(diarios)), "Días con eventos registrados", tema.TEXTO),
         ]
-        for i, (lbl, val) in enumerate(cards):
-            frame_res.grid_columnconfigure(i, weight=1)
-            f = ctk.CTkFrame(frame_res, corner_radius=8)
-            f.grid(row=0, column=i, padx=6, pady=6, sticky="ew")
-            ctk.CTkLabel(f, text=val, font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(10, 2))
-            ctk.CTkLabel(f, text=lbl, text_color="gray").pack(pady=(0, 10))
+        resumen = ctk.CTkFrame(contenido, fg_color=tema.FONDO)
+        resumen.pack(fill="x", pady=(0, 12))
+        # Dos filas mantienen las etiquetas legibles con la barra lateral a 1280 px.
+        for i, (titulo, valor, detalle, color) in enumerate(tarjetas):
+            resumen.grid_columnconfigure(i % 3, weight=1, uniform="kpi")
+            card = ctk.CTkFrame(resumen, fg_color=tema.PANEL, border_width=1,
+                                border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+            card.grid(row=i // 3, column=i % 3, sticky="nsew", padx=4, pady=4)
+            etiqueta(card, titulo, 12, tema.TEXTO_SUAVE).pack(padx=8, pady=(12, 2))
+            ctk.CTkLabel(card, text=valor, font=tema.dato(25, "bold"),
+                         text_color=color).pack()
+            etiqueta(card, detalle, 11, tema.TEXTO_TENUE).pack(padx=8, pady=(2, 12))
 
-        tabla = ctk.CTkScrollableFrame(contenedor, label_text="Últimos 50 registros")
-        tabla.pack(fill="both", expand=True)
+        def grafico(titulo, alto=240):
+            panel = ctk.CTkFrame(contenido, fg_color=tema.PANEL,
+                                 corner_radius=tema.RADIO_CARD, border_width=1,
+                                 border_color=tema.LINEA)
+            panel.pack(fill="x", padx=4, pady=(0, 12))
+            etiqueta(panel, titulo, 14, anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+            figura = Figure(figsize=(7, alto / 100), dpi=100, facecolor=tema.PANEL)
+            ax = figura.add_subplot(111)
+            ax.set_facecolor(tema.PANEL)
+            ax.tick_params(colors=tema.TEXTO_TENUE, labelsize=9)
+            for lado in ("bottom", "left"):
+                ax.spines[lado].set_color(tema.LINEA)
+            for lado in ("top", "right"):
+                ax.spines[lado].set_visible(False)
+            ax.grid(axis="y", color=tema.LINEA, linewidth=0.7)
+            ax.set_axisbelow(True)
+            canvas = FigureCanvasTkAgg(figura, master=panel)
+            widget = canvas.get_tk_widget()
+            widget.configure(height=alto, width=1, background=tema.PANEL,
+                             highlightthickness=0)
+            widget.pack(fill="x", padx=8, pady=8)
 
-        headers = ["Fecha / Hora", "EAR", "Duración", "Clasif.", "Usuario", "Nivel", "PERCLOS", "Índice"]
-        widths  = [155, 55, 75, 85, 110, 80, 70, 60]
-        for col, (h_txt, w) in enumerate(zip(headers, widths)):
-            ctk.CTkLabel(tabla, text=h_txt, font=ctk.CTkFont(weight="bold"),
-                         width=w, anchor="w").grid(row=0, column=col, padx=4, pady=(4, 8), sticky="w")
+            def liberar(event):
+                if event.widget is not widget:
+                    return
+                # Figure directa: no se registra en pyplot. Cancelar draws pendientes
+                # y vaciar la figura; no desenganchar canvas.figure (matplotlib
+                # todavía procesa eventos del canvas y fallaría con None).
+                for atributo in ("_idle_draw_id", "_event_loop_id"):
+                    pendiente = getattr(canvas, atributo, None)
+                    if pendiente:
+                        widget.after_cancel(pendiente)
+                        setattr(canvas, atributo, None)
+                figura.clear()
+            widget.bind("<Destroy>", liberar, add="+")
+            return figura, ax, canvas
 
-        for ri, (fecha, ear, nombre, nivel, dur, clasif, perc, idx) in enumerate(
-                self.bd.obtener_historial(usuario_id, 50), start=1):
-            bg = "#2b2b2b" if ri % 2 == 0 else "#1e1e1e"
-            dur_txt  = f"{dur} ms" if dur != "—" else "—"
-            perc_txt = f"{perc} %" if perc != "—" else "—"
-            valores  = [fecha, f"{ear:.3f}", dur_txt, clasif, nombre, nivel, perc_txt, idx]
-            for col, (val, w) in enumerate(zip(valores, widths)):
-                ctk.CTkLabel(tabla, text=val, width=w, anchor="w",
-                             fg_color=bg, corner_radius=0).grid(
-                    row=ri, column=col, padx=4, pady=1, sticky="ew")
+        hoy = datetime.now().date()
+        dias = [hoy - timedelta(days=i) for i in range(13, -1, -1)]
+        fig, ax, canvas = grafico("Parpadeos por día · últimos 14 días")
+        ax.bar(range(14), [sum(categoria(f[5]) in ("Normal", "Lento")
+                              for f in diarios.get(d, ())) for d in dias],
+               color=tema.ACENTO_VIVO, width=0.6)
+        ax.set_xticks(range(14), [d.strftime("%d/%m") for d in dias], rotation=35)
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_ylim(bottom=0)
+        fig.tight_layout(pad=1.5)
+        canvas.draw()
+
+        fig, ax, canvas = grafico("Evolución · promedios diarios del historial", 270)
+        for columna, nombre, color in ((7, "Índice de fatiga", tema.ACENTO_VIVO),
+                                        (6, "PERCLOS (%)", tema.OK)):
+            puntos = [(d, promedio(diarios[d], columna)) for d in sorted(diarios)]
+            puntos = [(d, v) for d, v in puntos if v is not None]
+            if puntos:
+                ax.plot([d for d, _ in puntos], [v for _, v in puntos],
+                        marker="o", markersize=3, linewidth=1.5, color=color, label=nombre)
+        if ax.lines:
+            from matplotlib.dates import AutoDateLocator, DateFormatter
+            fechas = sorted(diarios)
+            if len(fechas) < 3:
+                # Con 1-2 días el localizador automático abre el eje varios años.
+                ax.set_xlim(fechas[0] - timedelta(days=3), fechas[-1] + timedelta(days=3))
+                ax.set_xticks(fechas)
+            else:
+                ax.xaxis.set_major_locator(AutoDateLocator(minticks=3, maxticks=7))
+            ax.xaxis.set_major_formatter(DateFormatter("%d/%m"))
+            leyenda = ax.legend(frameon=False, fontsize=9)
+            for texto in leyenda.get_texts():
+                texto.set_color(tema.TEXTO_SUAVE)
+        else:
+            ax.text(0.5, 0.5, "Todavía no hay mediciones con fecha válida",
+                    transform=ax.transAxes, ha="center", color=tema.TEXTO_TENUE)
+        ax.set_ylim(0, 100)
+        fig.tight_layout(pad=1.5)
+        canvas.draw()
+
+        fig, ax, canvas = grafico("Distribución de eventos · todo el historial")
+        clases = ["Normal", "Lento", "Prolongado", "Microsueño", "Falsos"]
+        if conteos["Sin clasificar"]:
+            clases.append("Sin clasificar")
+        barras = ax.barh(clases, [conteos[c] for c in clases],
+                         color=[colores_clase[c] for c in clases], height=0.55)
+        ax.bar_label(barras, padding=4, color=tema.TEXTO_SUAVE, fontsize=9)
+        ax.invert_yaxis()
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_xlim(0, max(1, max(conteos.values())) * 1.18)
+        fig.tight_layout(pad=1.5)
+        canvas.draw()
+
+        etiqueta(contenido, "Últimos 50 registros", 16, anchor="w").pack(fill="x", padx=8)
+        etiqueta(contenido, "Orden de registro · duración en ms · PERCLOS en % · índice de 0 a 100",
+                 11, tema.TEXTO_TENUE, anchor="w").pack(fill="x", padx=8, pady=(0, 8))
+        tabla = ctk.CTkFrame(contenido, fg_color=tema.PANEL, corner_radius=tema.RADIO_CARD)
+        tabla.pack(fill="x", padx=4, pady=(0, 12))
+        cabecera = ctk.CTkFrame(tabla, fg_color=tema.PANEL_ALTO, corner_radius=tema.RADIO)
+        cabecera.pack(fill="x", padx=(6, 22), pady=(6, 0))
+        cuerpo = ctk.CTkScrollableFrame(tabla, height=300, fg_color=tema.PANEL,
+                                       corner_radius=tema.RADIO,
+                                       scrollbar_button_color=tema.ACENTO,
+                                       scrollbar_button_hover_color=tema.ACENTO_VIVO)
+        cuerpo.pack(fill="x", padx=0, pady=(0, 6))
+        columnas = [("Fecha y hora", 3), ("EAR", 1), ("Duración", 1),
+                    ("Clasificación", 2), ("Usuario", 2), ("Nivel", 2),
+                    ("PERCLOS", 1), ("Índice", 1)]
+
+        def fila_tabla(parent, valores, encabezado=False, registro=None):
+            for col, ((_, peso), valor) in enumerate(zip(columnas, valores)):
+                parent.grid_columnconfigure(col, weight=peso, uniform="tabla")
+                color = tema.TEXTO_SUAVE
+                fondo = tema.PANEL_ALTO if encabezado else tema.PANEL
+                if registro and col in (3, 5):
+                    color = (colores_clase[categoria(registro[5])] if col == 3 else
+                             colores_nivel.get(registro[3], tema.TEXTO_TENUE))
+                    fondo = tema.PANEL_ALTO
+                label = ctk.CTkLabel(parent, text=str(valor), width=1, height=32,
+                                     anchor="e" if col in (1, 2, 6, 7) else "w",
+                                     font=tema.ui(11, "bold") if encabezado else tema.ui(11),
+                                     text_color=color, fg_color=fondo,
+                                     corner_radius=tema.RADIO_CARD)
+                label.grid(row=0, column=col, sticky="ew", padx=3, pady=3)
+
+        fila_tabla(cabecera, [c[0] for c in columnas], encabezado=True)
+        for f in filas[:50]:
+            d = fecha(f[0])
+            valores = [d.strftime("%d/%m/%y %H:%M") if d else "Sin fecha",
+                       formato(f[1], 3), formato(f[4], 0),
+                       f[5] if f[5] != "—" else "Sin clasificar", f[2], f[3],
+                       formato(f[6]), formato(f[7])]
+            renglon = ctk.CTkFrame(cuerpo, fg_color=tema.PANEL, corner_radius=tema.RADIO)
+            renglon.pack(fill="x")
+            fila_tabla(renglon, valores, registro=f)
+            ctk.CTkFrame(cuerpo, height=1, fg_color=tema.LINEA).pack(fill="x")
 
     def _construir_vista_chart(self, tab):
-        ctk.CTkLabel(tab, text="Gráfica EAR en tiempo real", font=ctk.CTkFont(size=18, weight="bold"),
-                     anchor="w").pack(fill="x", pady=(0, 10))
-        self._chart_figure = Figure(figsize=(7, 4), dpi=100,
-                                     facecolor=TemaArgos.FONDO)
-        self._chart_ax     = self._chart_figure.add_subplot(111)
-        self._chart_canvas = FigureCanvasTkAgg(self._chart_figure, master=tab)
-        self._chart_canvas.get_tk_widget().pack(fill="both", expand=True)
+        tema = TemaArgos
+        ctk.CTkLabel(tab, text="Gráfica EAR en tiempo real", font=tema.ui(22),
+                     text_color=tema.TEXTO, anchor="w").pack(fill="x")
+        ctk.CTkLabel(tab, text="Apertura de los ojos · señal cruda, suavizado y referencias",
+                     font=tema.ui(12), text_color=tema.TEXTO_TENUE,
+                     anchor="w").pack(fill="x", pady=(0, 12))
+        contenido = ctk.CTkScrollableFrame(tab, fg_color=tema.FONDO,
+                     corner_radius=tema.RADIO, scrollbar_button_color=tema.ACENTO,
+                     scrollbar_button_hover_color=tema.ACENTO_VIVO)
+        contenido.pack(fill="both", expand=True)
+        tarjetas = ctk.CTkFrame(contenido, fg_color=tema.FONDO)
+        tarjetas.pack(fill="x", pady=(0, 12))
+        self._chart_valores = {}
+        for i, (clave, titulo) in enumerate((('ear', 'EAR actual · suavizado'),
+                ('base', 'Referencia de ojo abierto'), ('estado', 'Estado del ojo'),
+                ('fps', 'Cuadros por segundo'))):
+            tarjetas.grid_columnconfigure(i % 2, weight=1, uniform="ear")
+            card = ctk.CTkFrame(tarjetas, fg_color=tema.PANEL,
+                               border_width=1, border_color=tema.LINEA,
+                               corner_radius=tema.RADIO_CARD)
+            card.grid(row=i // 2, column=i % 2, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(card, text=titulo, font=tema.ui(11),
+                         text_color=tema.TEXTO_TENUE).pack(padx=12, pady=(10, 0))
+            valor = ctk.CTkLabel(card, text="—", font=tema.dato(18),
+                                text_color=tema.TEXTO, wraplength=300)
+            valor.pack(padx=12, pady=(0, 10))
+            self._chart_valores[clave] = valor
+        panel = ctk.CTkFrame(contenido, fg_color=tema.PANEL, border_width=1,
+                             border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+        panel.pack(fill="x", padx=4, pady=(0, 8))
+        self._chart_figure = Figure(figsize=(7, 3.5), dpi=100, facecolor=tema.PANEL)
+        ax = self._chart_ax = self._chart_figure.add_subplot(111)
+        ax.set_facecolor(tema.PANEL)
+        for lado in ("bottom", "left"):
+            ax.spines[lado].set_color(tema.LINEA)
+        for lado in ("top", "right"):
+            ax.spines[lado].set_visible(False)
+        ax.tick_params(colors=tema.TEXTO_TENUE, labelsize=9)
+        ax.grid(True, color=tema.LINEA, linewidth=0.7)
+        ax.set_axisbelow(True)
+        self._chart_crudo, = ax.plot([], [], color=tema.TEXTO_TENUE,
+                                     linewidth=1, alpha=0.7, label="EAR crudo")
+        self._chart_suave, = ax.plot([], [], color=tema.ACENTO_VIVO,
+                                     linewidth=1.8, label="EAR suavizado")
+        self._chart_umbral = ax.axhline(self.p_umbral_ear, color=tema.ALERTA,
+                              linestyle="--", linewidth=1.2, label="Inicio de cierre")
+        self._chart_base = ax.axhline(0, color=tema.OK, linestyle=":",
+                              linewidth=1.2, label="Referencia de ojo abierto")
+        self._chart_base.set_visible(False)
+        self._chart_mensaje = ax.text(0.5, 0.5, "Iniciá la detección para ver la señal",
+                       ha="center", va="center", transform=ax.transAxes,
+                       color=tema.TEXTO_SUAVE, fontsize=10)
+        leyenda = ax.legend(loc="upper right", ncol=2, fontsize=8, frameon=False)
+        for texto in leyenda.get_texts():
+            texto.set_color(tema.TEXTO_SUAVE)
+        ax.set_xlim(-149, 0)
+        ax.set_ylim(0, 0.5)
+        ax.set_xlabel("Cuadros anteriores al más reciente", color=tema.TEXTO_TENUE, fontsize=9)
+        ax.set_ylabel("EAR", color=tema.TEXTO_TENUE, fontsize=9)
+        self._chart_figure.tight_layout(pad=1.5)
+        canvas = self._chart_canvas = FigureCanvasTkAgg(self._chart_figure, master=panel)
+        widget = canvas.get_tk_widget()
+        widget.configure(width=1, height=350, background=tema.PANEL, highlightthickness=0)
+        widget.pack(fill="x", padx=8, pady=8)
+        self._chart_after_id = None
+        figura = self._chart_figure
+
+        def liberar(event):
+            if event.widget is not widget:
+                return
+            if self._chart_after_id is not None:
+                self.after_cancel(self._chart_after_id)
+                self._chart_after_id = None
+            for atributo in ("_idle_draw_id", "_event_loop_id"):
+                pendiente = getattr(canvas, atributo, None)
+                if pendiente:
+                    widget.after_cancel(pendiente)
+                    setattr(canvas, atributo, None)
+            # Matplotlib puede seguir despachando eventos de cierre del canvas.
+            figura.clear()
+        widget.bind("<Destroy>", liberar, add="+")
+        canvas.draw_idle()
 
     def _refrescar_grafico(self):
-        """Redibuja la gráfica EAR mientras la vista 'Gráfica EAR' esté activa
-        (self._grafico_activo la corta al navegar a otra sección)."""
+        """Actualiza artistas existentes y mantiene una sola cadena de after()."""
+        pendiente = getattr(self, "_chart_after_id", None)
+        if pendiente is not None:
+            self.after_cancel(pendiente)
+            self._chart_after_id = None
         if not self._grafico_activo:
             return
         datos = list(self.historico_ear)
-        ax = self._chart_ax
-        ax.clear()
+        n = max(1, self.ear_buffer.maxlen or 1)
+        # Solo ventanas completas: al recortarse el historial no conocemos
+        # los cuadros anteriores. No se inventa suavizado en el borde izquierdo.
+        suaves = [sum(datos[i - n + 1:i + 1]) / n for i in range(n - 1, len(datos))]
+        xs = list(range(1 - len(datos), 1))
+        self._chart_crudo.set_data(xs, datos)
+        self._chart_suave.set_data(xs[n - 1:], suaves)
+        self._chart_umbral.set_ydata([self.p_umbral_ear] * 2)
+        base = self.detector.baseline
+        self._chart_base.set_visible(base is not None)
+        if base is not None:
+            self._chart_base.set_ydata([base] * 2)
+        estado = self.label_estado_ojo.cget("text").removeprefix("Ojo: ")
+        activo = self.sistema_activo
+        sin_senal = not activo or not datos or estado in ("sin señal", "sin rostro", "—")
+        actual = sum(self.ear_buffer) / len(self.ear_buffer) if self.ear_buffer else None
+        self._chart_valores['ear'].configure(text="—" if sin_senal or actual is None
+                                            else f"{actual:.3f}".replace('.', ','))
+        self._chart_valores['base'].configure(text="Sin calibrar" if base is None
+                                             else f"{base:.3f}".replace('.', ','))
+        self._chart_valores['estado'].configure(text=estado if activo else "Detección detenida")
+        self._chart_valores['fps'].configure(text=f"{self._fps:.0f}" if activo else "—")
+        self._chart_mensaje.set_visible(sin_senal)
+        self._chart_mensaje.set_text("Iniciá la detección para ver la señal" if not activo
+                                     else "Sin señal de los ojos · se conserva la última traza")
+        self._chart_ax.set_xlim(-max(1, (self.historico_ear.maxlen or 150) - 1), 0)
+        self._chart_ax.set_ylim(0, max(0.5, max(datos + [base or 0, self.p_umbral_ear]) * 1.15))
+        self._chart_canvas.draw_idle()
+        self._chart_after_id = self.after(200, self._refrescar_grafico)
 
-        # La figura entra al tema: sin esto matplotlib deja su gris de fábrica,
-        # que corta con el resto de la interfaz.
-        self._chart_figure.patch.set_facecolor(TemaArgos.FONDO)
-        ax.set_facecolor(TemaArgos.FONDO)
-        for lado in ("bottom", "left"):
-            ax.spines[lado].set_color(TemaArgos.ACENTO)
-        for lado in ("top", "right"):
-            ax.spines[lado].set_visible(False)
-        ax.tick_params(colors=TemaArgos.TEXTO_TENUE, labelsize=8)
-        ax.grid(True, color=TemaArgos.LINEA, linewidth=0.8)
-        ax.set_axisbelow(True)
+    def _about_texto_adaptable(self, contenedor, texto, padding=20, tamano=13,
+                              color=None, pady=(0, 18)):
+        """Ajusta el texto desde el ancho del contenedor, nunca desde el label."""
+        label = ctk.CTkLabel(contenedor, text=texto, font=TemaArgos.ui(tamano),
+                            text_color=color or TemaArgos.TEXTO_SUAVE,
+                            justify="left", anchor="w", wraplength=280)
+        label.pack(fill="x", padx=padding, pady=pady)
 
-        if datos:
-            ax.plot(range(len(datos)), datos, color=TemaArgos.ACENTO_VIVO,
-                    linewidth=1.6, label="EAR suavizado")
-            ax.axhline(self.p_umbral_ear, color=TemaArgos.ALERTA, linestyle="--",
-                       linewidth=1.2, label=f"Umbral {self.p_umbral_ear:.2f}")
-            leg = ax.legend(loc="upper right", fontsize=8, framealpha=0)
-            for t in leg.get_texts():
-                t.set_color(TemaArgos.TEXTO_SUAVE)
-        else:
-            ax.text(0.5, 0.5, "Iniciá la detección para ver la traza en vivo",
-                    ha="center", va="center", transform=ax.transAxes,
-                    color=TemaArgos.TEXTO_TENUE, fontsize=10)
+        # CTkFrame.bind engancha el evento a su canvas interno: event.widget es
+        # ese canvas, no el frame.
+        objetivo = getattr(contenedor, "_canvas", contenedor)
 
-        ax.set_ylim(0.0, 0.5)
-        ax.set_xlabel("Cuadros recientes (~5 s)", color=TemaArgos.TEXTO_TENUE, fontsize=9)
-        ax.set_ylabel("EAR", color=TemaArgos.TEXTO_TENUE, fontsize=9)
-        self._chart_figure.tight_layout()
-        self._chart_canvas.draw()
-        self.after(200, self._refrescar_grafico)
-        
-      #===========================================================================================    
-    #===========================================================================================
-    # Antigua vista de About (ahora movidaa menu principal)
-     #===========================================================================================    
-        #===========================================================================================
+        def ajustar(event):
+            if event.widget is objetivo:
+                ancho = int(event.width / contenedor._get_widget_scaling())
+                limite = max(160, ancho - 2 * padding - 4)
+                if label.cget("wraplength") != limite:
+                    label.configure(wraplength=limite)
+        contenedor.bind("<Configure>", ajustar, add="+")
+        return label
 
     def _construir_vista_about(self, tab):
-        ctk.CTkLabel(tab, text="ARGOS", font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(0, 0))
-        ctk.CTkLabel(tab, text="Argos Panoptes — «el que todo lo ve»",
-                     text_color="gray", font=ctk.CTkFont(size=12)).pack(pady=(0, 12))
-
-        tabs = ctk.CTkTabview(tab)
-        tabs.pack(fill="both", expand=True)
-        tabs.add("¿Por qué Argos?")
-        tabs.add("El sistema")
-        tabs.add("Creadores")
-        self._about_por_que(tabs.tab("¿Por qué Argos?"))
-        self._about_sistema(tabs.tab("El sistema"))
-        self._about_creadores(tabs.tab("Creadores"))
+        tema = TemaArgos
+        contenido = ctk.CTkScrollableFrame(tab, fg_color=tema.FONDO,
+                       corner_radius=tema.RADIO, scrollbar_button_color=tema.ACENTO,
+                       scrollbar_button_hover_color=tema.ACENTO_VIVO)
+        contenido.pack(fill="both", expand=True)
+        hero = ctk.CTkFrame(contenido, fg_color=tema.PANEL, border_width=1,
+                           border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+        hero.pack(fill="x", padx=4, pady=(4, 18))
+        cabecera = ctk.CTkFrame(hero, fg_color=tema.PANEL)
+        cabecera.pack(fill="x", padx=24, pady=(24, 16))
+        logo = cargar_logo((104, 104))
+        ctk.CTkLabel(cabecera, text="" if logo else "ARGOS", image=logo,
+                     width=112, height=112, font=tema.dato(20),
+                     text_color=tema.ACENTO_VIVO).pack(side="left", padx=(0, 24))
+        titulos = ctk.CTkFrame(cabecera, fg_color=tema.PANEL)
+        titulos.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(titulos, text="A R G O S", font=fuente_portada(34),
+                     text_color=tema.TEXTO, anchor="w").pack(fill="x")
+        ctk.CTkLabel(titulos, text="Monitor de fatiga visual", font=tema.ui(18),
+                     text_color=tema.TEXTO_SUAVE, anchor="w").pack(fill="x", pady=(2, 4))
+        self._about_texto_adaptable(titulos, 'Argos Panoptes — «el que todo lo ve»',
+                                    padding=0, color=tema.TEXTO_TENUE, pady=0)
+        chips = ctk.CTkFrame(hero, fg_color=tema.PANEL)
+        chips.pack(fill="x", padx=24, pady=(0, 24))
+        for texto in ("Proyecto de tesis", "Python", "Uso preventivo, no médico"):
+            ctk.CTkLabel(chips, text=f"  {texto}  ", font=tema.ui(11),
+                         fg_color=tema.PANEL_ALTO, text_color=tema.TEXTO_SUAVE,
+                         corner_radius=tema.RADIO_CARD).pack(side="left", padx=(0, 8))
+        self._about_por_que(contenido)
+        self._about_sistema(contenido)
+        self._about_creadores(contenido)
 
     def _about_por_que(self, tab):
+        tema = TemaArgos
         texto = (
             "En la mitología griega, Argos Panoptes era un gigante de cien ojos "
             "repartidos por todo el cuerpo. Su don no era solo ver: era no dejar de "
@@ -3082,50 +3685,158 @@ class InterfazFatiga(ctk.CTkFrame):
             "Argos mitológico jamás se permitía. Donde el gigante vigilaba sin dormir, "
             "nuestro Argos vigila para avisar cuándo es momento de descansar."
         )
-        ctk.CTkLabel(tab, text=texto, wraplength=560, justify="left",
-                     font=ctk.CTkFont(size=13)).pack(padx=16, pady=16, anchor="w")
+        card = ctk.CTkFrame(tab, fg_color=tema.PANEL, border_width=1,
+                           border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+        card.pack(fill="x", padx=4, pady=(0, 18))
+        ctk.CTkLabel(card, text="¿Por qué Argos?", font=tema.ui(22),
+                     text_color=tema.TEXTO, anchor="w").pack(fill="x", padx=20, pady=(18, 12))
+        self._about_texto_adaptable(card, texto)
 
     def _about_sistema(self, tab):
-        ctk.CTkLabel(tab, text="Argos combina visión por computadora y métricas validadas "
-                     "para estimar la fatiga visual de forma no invasiva, solo con la cámara.",
-                     wraplength=560, justify="left").pack(padx=16, pady=(16, 10), anchor="w")
+        tema = TemaArgos
+
+        def titulo(texto):
+            ctk.CTkLabel(tab, text=texto, font=tema.ui(22), text_color=tema.TEXTO,
+                         anchor="w").pack(fill="x", padx=8, pady=(8, 12))
+
+        titulo("Cómo funciona")
+        flujo = ctk.CTkFrame(tab, fg_color=tema.FONDO)
+        flujo.pack(fill="x", padx=4, pady=(0, 18))
+        pasos = [("Cámara", "Captura de la imagen"),
+                 ("MediaPipe", "478 puntos de la cara"),
+                 ("EAR 3D", "Apertura de los ojos + pose de cabeza"),
+                 ("Detector de parpadeos", "Caída relativa respecto del baseline"),
+                 ("Índice de fatiga", "Evaluación y alertas")]
+        tarjetas, flechas = [], []
+        for i, (nombre, detalle) in enumerate(pasos):
+            card = ctk.CTkFrame(flujo, fg_color=tema.PANEL, border_width=1,
+                               border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+            ctk.CTkLabel(card, text=f"0{i + 1}", font=tema.dato(20, "bold"),
+                         text_color=tema.ACENTO_VIVO, anchor="w").pack(
+                             fill="x", padx=14, pady=(14, 4))
+            self._about_texto_adaptable(card, nombre, padding=14, tamano=14,
+                                        color=tema.TEXTO, pady=(0, 6))
+            self._about_texto_adaptable(card, detalle, padding=14, tamano=12,
+                                        color=tema.TEXTO_TENUE, pady=(0, 14))
+            tarjetas.append(card)
+            if i < 4:
+                flechas.append(ctk.CTkLabel(flujo, text="→", width=24,
+                               font=tema.ui(20), text_color=tema.ACENTO_VIVO))
+        distribucion = [None]
+
+        def distribuir(event):
+            if event.widget is not flujo._canvas:  # CTkFrame.bind → canvas interno
+                return
+            ancho = event.width / flujo._get_widget_scaling()
+            columnas = 5 if ancho >= 1120 else 3
+            if distribucion[0] == columnas:
+                return
+            distribucion[0] = columnas
+            for widget in tarjetas + flechas:
+                widget.grid_forget()
+            for col in range(9):
+                flujo.grid_columnconfigure(col, weight=0, minsize=0, uniform="")
+            for col in range(columnas):
+                flujo.grid_columnconfigure(col * 2, weight=1, uniform="pasos")
+            for i, card in enumerate(tarjetas):
+                fila, col = divmod(i, columnas)
+                card.grid(row=fila * 2, column=col * 2, sticky="nsew", pady=4)
+                if i < 4:
+                    if col < columnas - 1:
+                        flechas[i].configure(text="→")
+                        flechas[i].grid(row=fila * 2, column=col * 2 + 1, padx=4)
+                    else:
+                        flechas[i].configure(text="↓")
+                        flechas[i].grid(row=fila * 2 + 1, column=0,
+                                        columnspan=columnas * 2 - 1)
+        flujo.bind("<Configure>", distribuir, add="+")
+
+        titulo("Qué mide")
+        metricas = ctk.CTkFrame(tab, fg_color=tema.FONDO)
+        metricas.pack(fill="x", pady=(0, 18))
+        metricas.grid_columnconfigure((0, 1), weight=1, uniform="metricas")
         items = [
-            ("Detección EAR", "Eye Aspect Ratio con MediaPipe FaceLandmarker y baseline adaptativo."),
-            ("PERCLOS", "Porcentaje de tiempo con ojos cerrados, indicador validado de somnolencia."),
-            ("Índice de fatiga", "Puntaje 0–100 que pondera duración, frecuencia y microsueños."),
-            ("Prueba guiada", "Protocolo de validación por fases: verifica que la detección sea correcta."),
+            ("control", "Parpadeos", "EAR en 3D con baseline móvil por ojo. Detecta por caída relativa para contar bien las ráfagas y los parpadeos con la cabeza girada."),
+            ("stats", "PERCLOS", "Porcentaje de tiempo con los ojos cerrados en una ventana de 60 s. Los cuadros mirando abajo o de perfil no se cuentan."),
+            ("chart", "Índice de fatiga", "Puntaje de 0 a 100 que pondera PERCLOS, duración, frecuencia, cierres prolongados y variabilidad. Niveles: Normal, Leve, Moderada y Severa."),
+            ("calib", "Alertas escalonadas", "Aviso en la app, notificación, sonido y pausa según el nivel. Esperan 60 s de calentamiento antes de activarse."),
         ]
-        for titulo, desc in items:
-            f = ctk.CTkFrame(tab)
-            f.pack(fill="x", padx=16, pady=4)
-            ctk.CTkLabel(f, text=titulo, anchor="w",
-                         font=ctk.CTkFont(size=13, weight="bold")).pack(fill="x", padx=12, pady=(8, 0))
-            ctk.CTkLabel(f, text=desc, anchor="w", justify="left", wraplength=520,
-                         text_color="gray", font=ctk.CTkFont(size=11)).pack(fill="x", padx=12, pady=(0, 8))
+        for i, (icono, nombre, texto) in enumerate(items):
+            card = ctk.CTkFrame(metricas, fg_color=tema.PANEL, border_width=1,
+                               border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+            card.grid(row=i // 2, column=i % 2, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(card, text=f"  {nombre}", image=cargar_icono(f"icon_nav_{icono}", (24, 24)),
+                         compound="left", font=tema.ui(16, "bold"), text_color=tema.TEXTO,
+                         anchor="w").pack(fill="x", padx=20, pady=(18, 12))
+            self._about_texto_adaptable(card, texto)
+
+        titulo("Fundamento")
+        fundamento = ctk.CTkFrame(tab, fg_color=tema.PANEL, border_width=1,
+                                 border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+        fundamento.pack(fill="x", padx=4, pady=(0, 10))
+        referencias = [
+            "Soukupová y Čech (2016) · Detección de parpadeo con landmarks y EAR.",
+            "Wolffsohn et al. (2017) · TFOS DEWS II.",
+            "Coles-Brennan et al. (2019) · Fatiga visual digital.",
+            "American Optometric Association · Regla 20-20-20.",
+        ]
+        self._about_texto_adaptable(fundamento, "\n\n".join(f"•  {r}" for r in referencias),
+                                    pady=(18, 18))
+        aviso = ctk.CTkFrame(tab, fg_color=tema.PANEL, border_width=1,
+                            border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+        aviso.pack(fill="x", padx=4, pady=(0, 18))
+        self._about_texto_adaptable(aviso,
+            "Argos no es un dispositivo médico: recomienda prácticas preventivas y no diagnostica.",
+            color=tema.ALERTA, pady=(16, 16))
+
+        titulo("Tecnologías")
+        tecnologias = ctk.CTkFrame(tab, fg_color=tema.FONDO)
+        tecnologias.pack(fill="x", padx=4, pady=(0, 18))
+        chips = []
+        for texto in ("Python", "OpenCV", "MediaPipe", "CustomTkinter", "Matplotlib",
+                      "SQLite con cifrado AES-GCM", "Windows Hello"):
+            chip = ctk.CTkLabel(tecnologias, text=f"  {texto}  ", font=tema.ui(12),
+                                fg_color=tema.PANEL_ALTO, text_color=tema.TEXTO_SUAVE,
+                                corner_radius=tema.RADIO_CARD)
+            chips.append(chip)
+
+        # Posicionar por fila evita compartir anchos de columna entre filas.
+        def distribuir_chips(event):
+            if event.widget is not tecnologias._canvas:  # CTkFrame.bind → canvas interno
+                return
+            escala = tecnologias._get_widget_scaling()
+            ancho = event.width / escala
+            x, y = 0, 0
+            for chip in chips:
+                pedido = chip.winfo_reqwidth() / escala
+                if x and x + pedido > ancho:
+                    x, y = 0, y + 36
+                chip.place(x=x, y=y)
+                x += pedido + 8
+            tecnologias.configure(height=y + 32)
+        tecnologias.bind("<Configure>", distribuir_chips, add="+")
 
     def _about_creadores(self, tab):
-        ctk.CTkLabel(tab, text="Proyecto de tesis desarrollado por:",
-                     anchor="w").pack(padx=16, pady=(16, 8), anchor="w")
-        for iniciales, nombre in [("TM", "Tobias Molinas"), ("MM", "Matias Murto")]:
-            f = ctk.CTkFrame(tab)
-            f.pack(fill="x", padx=16, pady=6)
-            ctk.CTkLabel(f, text=iniciales, width=48, height=48,
-                         font=ctk.CTkFont(size=16, weight="bold"),
-                         fg_color="#2a6b6b", corner_radius=12).pack(side="left", padx=12, pady=12)
-            caja = ctk.CTkFrame(f, fg_color="transparent")
-            caja.pack(side="left", padx=(4, 0))
-            ctk.CTkLabel(caja, text=nombre, anchor="w",
-                         font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
-            ctk.CTkLabel(caja, text="Desarrollo · Investigación", anchor="w",
-                         text_color="gray", font=ctk.CTkFont(size=11)).pack(anchor="w")
-            
-            
-            
-#===========================================================================================    
-#===========================================================================================
-    # Fin Acerca de
-#===========================================================================================    
-#===========================================================================================
+        tema = TemaArgos
+        ctk.CTkLabel(tab, text="Creadores", font=tema.ui(22), text_color=tema.TEXTO,
+                     anchor="w").pack(fill="x", padx=8, pady=(8, 12))
+        creadores = ctk.CTkFrame(tab, fg_color=tema.FONDO)
+        creadores.pack(fill="x", pady=(0, 20))
+        creadores.grid_columnconfigure((0, 1), weight=1, uniform="creadores")
+        for i, (iniciales, nombre) in enumerate((("TM", "Tobias Molinas"), ("MM", "Matias Murto"))):
+            card = ctk.CTkFrame(creadores, fg_color=tema.PANEL, border_width=1,
+                               border_color=tema.LINEA, corner_radius=tema.RADIO_CARD)
+            card.grid(row=0, column=i, sticky="nsew", padx=4)
+            ctk.CTkLabel(card, text=iniciales, width=52, height=52,
+                         font=tema.dato(18, "bold"), text_color=tema.TEXTO,
+                         fg_color=tema.ACENTO, corner_radius=tema.RADIO_CARD).pack(
+                             side="left", padx=16, pady=20)
+            caja = ctk.CTkFrame(card, fg_color=tema.PANEL)
+            caja.pack(side="left", fill="x", expand=True, padx=(0, 16))
+            self._about_texto_adaptable(caja, nombre, padding=0, tamano=16,
+                                        color=tema.TEXTO, pady=(0, 4))
+            self._about_texto_adaptable(caja, "Desarrollo · Investigación", padding=0,
+                                        tamano=12, color=tema.TEXTO_TENUE, pady=0)
 
     # ── Auto-calibración (auto-ajustar todo) ─────────
     def _iniciar_auto_calibracion(self):
