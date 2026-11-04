@@ -2761,7 +2761,7 @@ class MenuPrincipal(ctk.CTk):
         cab = ctk.CTkFrame(v, fg_color="transparent")
         cab.grid(row=0, column=0, sticky="ew", padx=26, pady=(18, 12))
 
-        self.lbl_seccion = ctk.CTkLabel(cab, text="", font=fuente_portada(22),
+        self.lbl_seccion = ctk.CTkLabel(cab, text="", font=ctk.CTkFont(family="Agency FB", size=22),
                                          text_color=TemaArgos.TEXTO)
         self.lbl_seccion.pack(side="left")
         self.lbl_seccion_sub = ctk.CTkLabel(cab, text="", font=TemaArgos.dato(11),
@@ -4718,8 +4718,8 @@ class InterfazFatiga(ctk.CTkFrame):
         self.label_video.pack(expand=True, fill="both")
 
     def _construir_vista_calibracion(self, tab):
-        ctk.CTkLabel(tab, text="Calibración", font=ctk.CTkFont(size=18, weight="bold"),
-                     anchor="w").pack(fill="x", pady=(0, 10))
+        #ctk.CTkLabel(tab, text="Calibración", font=ctk.CTkFont(size=18, weight="bold"),
+             #        anchor="w").pack(fill="x", pady=(0, 10))
 
         cuerpo = ctk.CTkFrame(tab, fg_color="transparent")
         cuerpo.pack(fill="both", expand=True)
@@ -4833,7 +4833,7 @@ class InterfazFatiga(ctk.CTkFrame):
             return ctk.CTkLabel(parent, text=texto, font=tema.ui(tam),
                                 text_color=color or tema.TEXTO, **kwargs)
 
-        etiqueta(contenedor, "Estadísticas", 22, anchor="w").pack(fill="x")
+        #etiqueta(contenedor, "Estadísticas", 22, anchor="w").pack(fill="x")
         etiqueta(contenedor, f"{usuario_nombre} · Resumen del historial", 12,
                  tema.TEXTO_TENUE, anchor="w").pack(fill="x", pady=(0, 12))
         contenido = ctk.CTkScrollableFrame(
@@ -5023,8 +5023,8 @@ class InterfazFatiga(ctk.CTkFrame):
 
     def _construir_vista_chart(self, tab):
         tema = TemaArgos
-        ctk.CTkLabel(tab, text="Gráfica EAR en tiempo real", font=tema.ui(22),
-                     text_color=tema.TEXTO, anchor="w").pack(fill="x")
+        #ctk.CTkLabel(tab, text="Gráfica EAR en tiempo real", font=tema.ui(22),
+               #      text_color=tema.TEXTO, anchor="w").pack(fill="x")
         ctk.CTkLabel(tab, text="Apertura de los ojos · señal cruda, suavizado y referencias",
                      font=tema.ui(12), text_color=tema.TEXTO_TENUE,
                      anchor="w").pack(fill="x", pady=(0, 12))
@@ -5182,11 +5182,11 @@ class InterfazFatiga(ctk.CTkFrame):
                      text_color=tema.ACENTO_VIVO).pack(side="left", padx=(0, 24))
         titulos = ctk.CTkFrame(cabecera, fg_color=tema.PANEL)
         titulos.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(titulos, text="A R G O S", font=fuente_portada(34),
+        ctk.CTkLabel(titulos, text="A R G O S", font=ctk.CTkFont(family="Agency FB", size=34),
                      text_color=tema.TEXTO, anchor="w").pack(fill="x")
         ctk.CTkLabel(titulos, text="Monitor de fatiga visual", font=tema.ui(18),
                      text_color=tema.TEXTO_SUAVE, anchor="w").pack(fill="x", pady=(2, 4))
-        self._about_texto_adaptable(titulos, 'Argos Panoptes — «el que todo lo ve»',
+        self._about_texto_adaptable(titulos, 'Argos Panoptes — El vigilante perfecto',
                                     padding=0, color=tema.TEXTO_TENUE, pady=0)
         chips = ctk.CTkFrame(hero, fg_color=tema.PANEL)
         chips.pack(fill="x", padx=24, pady=(0, 24))
@@ -5202,14 +5202,14 @@ class InterfazFatiga(ctk.CTkFrame):
         tema = TemaArgos
         texto = (
             "En la mitología griega, Argos Panoptes era un gigante de cien ojos "
-            "repartidos por todo el cuerpo. Su don no era solo ver: era no dejar de "
+            "repartidos por todo el cuerpo. Su don no era solo ver, era no dejar de "
             "hacerlo. Cuando descansaba, cerraba apenas unos pocos ojos y mantenía el "
             "resto despiertos, de modo que su vigilancia nunca se interrumpía.\n\n"
-            "«Panoptes», el que todo lo observa: el guardián al que nada se le escapa, "
+            "Panoptes, el que todo lo observa, el guardián al que nada se le escapa, "
             "ni siquiera durante el sueño.\n\n"
-            "Ese centinela incansable da nombre al sistema. Argos observa los ojos del "
+            "Ese centinela incansable da nombre al sistema. Argos observa la vista del "
             "usuario en tiempo real para detectar el instante en que aparece la fatiga "
-            "—cuando los párpados empiezan a vencer a la voluntad—, justo aquello que el "
+            "cuando los párpados empiezan a vencer a la voluntad, justo aquello que el "
             "Argos mitológico jamás se permitía. Donde el gigante vigilaba sin dormir, "
             "nuestro Argos vigila para avisar cuándo es momento de descansar."
         )
